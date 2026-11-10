@@ -30,6 +30,7 @@ sends a failure email and the patch needs updating.
 |---|---|
 | `clix/src/Gk6x/` | The new G-Helper module, copied to `app/Peripherals/Keyboard/Gk6x/` |
 | `clix/apply_patch.py` | Copies the module and inserts the one-line hooks plus the updater URL |
+| `clix/badge_icons.py` | Adds a small pink dot to the app and tray icons so this build is easy to tell apart |
 | `clix/tests/` | 123 tests: CRC, byte-for-byte comparison with GK6X, fail-closed cases, replay of the real keyboard replies, coalescing |
 | `clix/probe/Gk6xProbe.ps1` | Read-only identity probe |
 | `clix/docs/Gk6xKeyboard.md` | Wire format and behaviour |

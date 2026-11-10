@@ -70,6 +70,16 @@ jobs:
         if: steps.up.outputs.build == 'True'
         run: dotnet run -c Release --project fork/clix/tests/Gk6x.Tests.csproj
 
+      - name: Setup Python
+        if: steps.up.outputs.build == 'True'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Pillow (icon badge)
+        if: steps.up.outputs.build == 'True'
+        run: python -m pip install --disable-pip-version-check pillow==12.3.0
+
       - name: Apply patch
         if: steps.up.outputs.build == 'True'
         run: python fork/clix/apply_patch.py upstream "${{ github.repository }}"

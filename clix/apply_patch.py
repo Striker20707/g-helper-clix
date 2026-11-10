@@ -134,6 +134,18 @@ def main():
                  f'"https://api.github.com/repos/{fork}/releases/latest"')
     replace_once(upd, '"https://github.com/seerge/g-helper/releases"', f'"https://github.com/{fork}/releases"')
 
+    # 8. Pink dot on the app and tray icons, so this build is easy to tell apart from official G-Helper
+    icons = [app / "favicon.ico"] + [app / "Resources" / f"{n}.ico" for n in
+             ("standard", "eco", "ultimate", "dark-standard", "dark-eco", "light-standard", "light-eco")]
+    for ico in icons:
+        if not ico.exists():
+            fail(f"icon {ico.relative_to(root)} not found (upstream renamed its icons?)")
+    require(app / "GHelper.csproj", "<ApplicationIcon>favicon.ico</ApplicationIcon>", "exe icon that gets the badge")
+    sys.path.insert(0, str(HERE))
+    import badge_icons
+    for ico in icons:
+        badge_icons.badge_file(ico)
+
     print("CLIX PATCH APPLIED")
 
 
