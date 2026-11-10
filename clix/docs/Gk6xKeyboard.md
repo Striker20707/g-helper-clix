@@ -27,7 +27,7 @@ Colours apply when you let go of the colour picker or click a key.
 "Off" is the Fn+R profile (4), written black once (`gk6x_dark_written`). Turning off or on is then just a
 profile switch (`0B 04` / `0B 02`): instant, with no flash write.
 
-Other config keys: `clix_autoselect` (1, switch to Fn+W on connect and after writes), `clix_skip_clear` (0),
+Other config keys: `clix_autoselect` (1, switch to the G-Helper profile on connect), `clix_double_buffer` (1, alternate Fn+W / Fn+E so the keyboard's wipe-before-write is never visible),
 `clix_chunk_delay` (10 ms). `"gk6x_keyboard": 0` turns all Clix support off.
 
 ## Where the lighting lives

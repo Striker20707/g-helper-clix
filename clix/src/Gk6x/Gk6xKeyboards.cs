@@ -20,8 +20,14 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
     {
         /// <summary>Switch the keyboard to Fn+W on connect and after each write (default on).</summary>
         public static bool AutoSelectProfile => AppConfig.Get("clix_autoselect", 1) != 0;
-        /// <summary>Skip the 21 02 06 clear before writing (only after it is confirmed on hardware).</summary>
-        public static bool SkipClear => AppConfig.Get("clix_skip_clear", 0) != 0;
+        /// <summary>
+        /// Double buffering (default on): new colours go into whichever of Fn+W (2) / Fn+E (3) is not showing, then
+        /// the keyboard switches to it, so the wipe the keyboard needs before every write is never visible.
+        /// The other slot is brought up to date a moment later. Off: always Fn+W, with a brief black flash.
+        /// (Writing without the wipe was tested 2026-11-10: the keyboard refuses chunk 10 with status 0A.)
+        /// </summary>
+        public static bool DoubleBuffer => AppConfig.Get("clix_double_buffer", 1) != 0;
+        public const byte BufferA = 2, BufferB = 3;
         /// <summary>Pause after each lighting chunk in ms (vendor app: 10).</summary>
         public static int ChunkDelayMs => Math.Clamp(AppConfig.Get("clix_chunk_delay", Gk6xKeyboard.ChunkDelayMs), 0, 50);
         /// <summary>Onboard profile written black once and selected as "lights off" (Fn+R).</summary>
@@ -39,7 +45,10 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
 
     public static class Gk6xKeyboards
     {
-        private const string LastWrittenKey = "gk6x_last_written";
+        private static string StampKey(byte profile) => $"gk6x_stamp_p{profile}";
+        private const string ActiveKey = "gk6x_active";
+        /// <summary>Delay before the hidden buffer is brought up to date after a visible change.</summary>
+        public const int StaleSyncDelayMs = 1500;
         public const int DebounceMs = 120;
         public const int MinWriteIntervalMs = 0;
 
@@ -164,21 +173,37 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
             lock (ioGate) return WriteLocked(target);
         }
 
+        private static byte ActiveProfile
+        {
+            get { int p = AppConfig.Get(ActiveKey, Gk6xSettings.BufferA); return p == Gk6xSettings.BufferB && Gk6xSettings.DoubleBuffer ? Gk6xSettings.BufferB : Gk6xSettings.BufferA; }
+            set => AppConfig.Set(ActiveKey, value);
+        }
+
         private static bool WriteLocked(Gk6xClix target)
         {
             uint[] slots = target.SnapshotSlots();
-            byte profile = Gk6xKeyboard.GHelperProfile;
             var id = target.Identity;
-            string stamp = $"{id.ModelId}:{id.FirmwareId:X8}:p{profile}:" + Hash(slots);
-            bool write = !verifiedThisSession || AppConfig.GetString(LastWrittenKey) != stamp;
+            string stamp = $"{id.ModelId}:{id.FirmwareId:X8}:" + Hash(slots);
+            bool dbl = Gk6xSettings.DoubleBuffer;
+            byte active = ActiveProfile;
+            byte other = dbl ? (active == Gk6xSettings.BufferA ? Gk6xSettings.BufferB : Gk6xSettings.BufferA) : active;
+
+            // primary: the colours changed (or first write this launch) -> write and show them
+            bool primary = !verifiedThisSession || AppConfig.GetString(StampKey(active)) != stamp;
+            byte writeTo = primary ? other : (byte)0;
+            // secondary (double buffering): bring the hidden slot up to date, without showing it
+            if (!primary && dbl && AppConfig.GetString(StampKey(other)) != stamp) writeTo = other;
+            bool hiddenSync = !primary && writeTo != 0;
+
             bool lit = ShouldBeLit();
-            byte targetProfile = lit ? profile : Gk6xSettings.DarkProfile;
+            byte shown = primary ? writeTo : active;
+            byte targetProfile = lit ? shown : Gk6xSettings.DarkProfile;
             string darkStamp = $"{id.ModelId}:{id.FirmwareId:X8}:p{Gk6xSettings.DarkProfile}:black";
             bool writeDark = !lit && AppConfig.GetString(DarkWrittenKey) != darkStamp;
-            // While lit, the profile is only re-selected when auto-select is on (or "off" was active before).
             bool select = !lit ? lastSelected != targetProfile
-                        : selectOnNextWrite || lastSelected == Gk6xSettings.DarkProfile || write && Gk6xSettings.AutoSelectProfile;
-            if (!write && !select && !writeDark) { SetStatus("Up to date", false); return false; }
+                        : selectOnNextWrite || lastSelected == Gk6xSettings.DarkProfile
+                          || primary && (dbl || Gk6xSettings.AutoSelectProfile) || lastSelected != 0 && lastSelected != targetProfile && dbl;
+            if (writeTo == 0 && !select && !writeDark) { SetStatus("Up to date", false); return false; }
 
             var transport = Gk6xHidTransport.TryOpenPath(target.DevicePath);
             if (transport is null) { Fail("keyboard not reachable (unplugged?)"); return false; }
@@ -188,12 +213,12 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
             kb.AssumeIdentity(id, target.Model);
             long t0 = Environment.TickCount64;
 
-            if (write)
+            if (writeTo != 0)
             {
                 // Forget the old stamp first: if this write fails part-way the next request must rewrite.
-                AppConfig.Set(LastWrittenKey, "");
-                kb.SetLighting(profile, slots, !Gk6xSettings.SkipClear, Gk6xSettings.ChunkDelayMs);
-                AppConfig.Set(LastWrittenKey, stamp);
+                AppConfig.Set(StampKey(writeTo), "");
+                kb.SetLighting(writeTo, slots, true, Gk6xSettings.ChunkDelayMs);
+                AppConfig.Set(StampKey(writeTo), stamp);
                 verifiedThisSession = true;
             }
 
@@ -206,18 +231,22 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
                 Logger.WriteLine($"GK6X: profile {Gk6xSettings.DarkProfile} set to black (lights-off state)");
             }
 
-            // Selecting the profile after a write is what makes the keyboard reload it (the vendor app and GK6X
-            // both do this). Without it a write made while Fn+W is active only shows after re-entering Fn+W.
+            // Selecting a profile is what makes the keyboard (re)load it (the vendor app and GK6X both do this).
             if (select)
             {
                 if (lit) selectOnNextWrite = false;
                 kb.SelectProfile(targetProfile);
                 lastSelected = targetProfile;
             }
+            if (primary) ActiveProfile = shown;
 
-            Logger.WriteLine($"GK6X: profile {profile} {(write ? "written" : "unchanged")}{(select ? $", profile {targetProfile} selected" : "")} in {Environment.TickCount64 - t0} ms");
-            SetStatus(write ? "Applied" : "Up to date", false);
-            return write;
+            Logger.WriteLine($"GK6X: {(writeTo != 0 ? $"profile {writeTo} written{(hiddenSync ? " (hidden copy)" : "")}" : "no write")}" +
+                             $"{(select ? $", profile {targetProfile} selected" : "")} in {Environment.TickCount64 - t0} ms");
+            SetStatus(writeTo != 0 ? "Applied" : "Up to date", false);
+
+            // After a visible change, update the hidden copy once things are quiet.
+            if (primary && dbl) _ = System.Threading.Tasks.Task.Delay(StaleSyncDelayMs).ContinueWith(_ => coalescer.Request());
+            return writeTo != 0;
         }
 
         private static string Hash(uint[] slots)
