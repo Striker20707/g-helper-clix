@@ -61,8 +61,11 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
         public static readonly byte[] WritableLightingProfiles = { GHelperProfile, 3, 4 };
 
         public const int ReplyTimeoutMs = 500;
-        /// <summary>Unsolicited reports (e.g. Fn notifications) tolerated while waiting for one reply.</summary>
-        public const int MaxSkippedReports = 8;
+        /// <summary>
+        /// Unsolicited reports (Fn notifications, key reports in driver mode) tolerated while waiting for one
+        /// reply. Live mode keeps one handle open for minutes, so typing between frames can queue a few dozen.
+        /// </summary>
+        public const int MaxSkippedReports = 64;
         /// <summary>Pause between lighting chunks, as the vendor app does (SLEEP_TO_WRITE, 10 ms).</summary>
         public const int ChunkDelayMs = 10;
 
@@ -224,6 +227,70 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
                 if (profile < 1 || profile > 4) throw new Gk6xException($"profile {profile} out of range");
                 byte[] p = Exchange(Gk6xProtocol.OpSetLayer, profile, false);
                 if (p[1] != profile) throw new Gk6xException($"profile switch not confirmed (reply 0x{p[1]:X2})");
+            }
+        }
+
+        // ---------------- Live lighting (driver mode) ----------------
+        // Sequence and replies as tested on the Matrix Clix 2026-11-10 (Gk6xLiveTest.ps1): 0C -> 00,
+        // 0B 05 -> 05, 16 01 x9 -> 01, 17 01 -> 01, 1A 01 x10 -> 01, 1A 02 -> 02. About 54 ms per frame.
+
+        public static bool LiveAccepted(byte status) => status == 0x00 || status == 0x01;
+
+        /// <summary>
+        /// Enters driver mode: ping, 0B 05, the normal key table for driver mode (so typing is unchanged) and
+        /// software-controlled lighting. Nothing is stored in the keyboard. Throws Gk6xException on any refusal.
+        /// </summary>
+        public void EnterLiveMode()
+        {
+            lock (ioLock)
+            {
+                if (Model is null || Identity is null) throw new Gk6xException("keyboard model not verified; refusing live mode");
+                uint[] keys = Gk6xKeyTables.MatrixClixNormalKeys;
+                if (Identity.BufferSizeA * Identity.BufferSizeB != keys.Length)
+                    throw new Gk6xException($"key table size {Identity.BufferSizeA}x{Identity.BufferSizeB} does not match the Clix table");
+
+                Exchange(Gk6xProtocol.OpPing, 0, false);
+                byte[] p = Exchange(Gk6xProtocol.OpSetLayer, Gk6xProtocol.LayerDriver, false);
+                if (p[1] != Gk6xProtocol.LayerDriver) throw new Gk6xException($"driver mode not confirmed (reply 0x{p[1]:X2})");
+                int n = 0;
+                foreach (byte[] report in Gk6xProtocol.BuildChunkedReports(Gk6xProtocol.OpDriverSetKeyValues, Gk6xProtocol.DriverSub, Gk6xProtocol.BuildKeyPayload(keys)))
+                {
+                    n++;
+                    p = SendAndAck(report, Gk6xProtocol.OpDriverSetKeyValues);
+                    if (!LiveAccepted(p[1])) throw new Gk6xException($"keyboard refused driver key chunk {n} (status 0x{p[1]:X2})");
+                }
+                p = SendAndAck(Gk6xProtocol.BuildReport(Gk6xProtocol.OpDriverLightingConfig, Gk6xProtocol.DriverSub, 0, Gk6xProtocol.DriverLightingConfig),
+                               Gk6xProtocol.OpDriverLightingConfig);
+                if (!LiveAccepted(p[1])) throw new Gk6xException($"keyboard refused live lighting (status 0x{p[1]:X2})");
+            }
+        }
+
+        /// <summary>Shows one frame (slot colours in EncodeColour format, brightness included): 1A 01 x10, 1A 02.</summary>
+        public void SendLiveFrame(uint[] slotColours)
+        {
+            lock (ioLock)
+            {
+                if (Model is null) throw new Gk6xException("keyboard model not verified; refusing live frame");
+                int n = 0;
+                byte[] p;
+                foreach (byte[] report in Gk6xProtocol.BuildChunkedReports(Gk6xProtocol.OpDriverFrame, Gk6xProtocol.FrameChunk, Gk6xProtocol.BuildLiveFrame(slotColours)))
+                {
+                    n++;
+                    p = SendAndAck(report, Gk6xProtocol.OpDriverFrame);
+                    if (!LiveAccepted(p[1])) throw new Gk6xException($"keyboard refused live frame chunk {n} (status 0x{p[1]:X2})");
+                }
+                p = Exchange(Gk6xProtocol.OpDriverFrame, Gk6xProtocol.FrameShow, false);
+                if (p[1] != Gk6xProtocol.FrameShow && !LiveAccepted(p[1])) throw new Gk6xException($"keyboard refused live frame (status 0x{p[1]:X2})");
+            }
+        }
+
+        /// <summary>Keep-alive for driver mode (0C). Any reply with a valid CRC counts.</summary>
+        public void Ping()
+        {
+            lock (ioLock)
+            {
+                if (Model is null) throw new Gk6xException("keyboard model not verified; refusing ping");
+                Exchange(Gk6xProtocol.OpPing, 0, false);
             }
         }
 

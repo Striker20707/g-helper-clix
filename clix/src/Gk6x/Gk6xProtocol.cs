@@ -34,6 +34,16 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
         public const byte OpLayerSetLightValues = 0x27;
         /// <summary>Key table of a layer: one u32 key value per LogicCode (GK6X SetKeys).</summary>
         public const byte OpLayerSetKeyValues = 0x22;
+        // Live ("driver mode") lighting, hardware-tested on the Matrix Clix 2026-11-10 (Gk6xLiveTest.ps1):
+        // nothing is stored; the keyboard shows the frames G-Helper sends while it keeps pinging.
+        /// <summary>Keep-alive. The keyboard leaves driver mode by itself when the pings stop.</summary>
+        public const byte OpPing = 0x0C;
+        /// <summary>Driver-mode key table (same u32 values as 0x22).</summary>
+        public const byte OpDriverSetKeyValues = 0x16;
+        /// <summary>Driver-mode lighting config: software-controlled lighting.</summary>
+        public const byte OpDriverLightingConfig = 0x17;
+        /// <summary>Driver-mode frame: sub 1 = chunk of LED colours, sub 2 = frame complete (show it).</summary>
+        public const byte OpDriverFrame = 0x1A;
 
         // OpInfo sub-commands
         public const byte InfoFirmwareId = 0x01;
@@ -41,6 +51,14 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
         public const byte InfoInitBuffers = 0x09;
 
         public const byte LayerBase = 1;
+        /// <summary>0B 05: driver mode (the vendor app's "online" profile).</summary>
+        public const byte LayerDriver = 5;
+        public const byte DriverSub = 1;
+        public const byte FrameChunk = 1, FrameShow = 2;
+        /// <summary>Live frame: one [R, G, B, 100] per LED slot (LocationCode), 132 slots = 528 bytes.</summary>
+        public const int LiveSlots = 132;
+        /// <summary>17 01 data as the vendor app sends it: model 240 (software), 1, brightness 18, speed 3, 0, 0, 0, 0, enable 15.</summary>
+        public static readonly byte[] DriverLightingConfig = { 240, 1, 18, 3, 0, 0, 0, 0, 15 };
         public const byte DataTypeLighting = 6;
         public const byte DataTypeKeySet = 1;
 
@@ -51,7 +69,10 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
         public const ushort EffectTypeStatic = 0;
 
         /// <summary>The only opcodes this module is allowed to send. Tests assert against this.</summary>
-        public static readonly byte[] AllowedOpcodes = { OpInfo, OpSetLayer, OpLayerResetDataType, OpLayerSetLightValues, OpLayerSetKeyValues };
+        public static readonly byte[] AllowedOpcodes = {
+            OpInfo, OpSetLayer, OpLayerResetDataType, OpLayerSetLightValues, OpLayerSetKeyValues,
+            OpPing, OpDriverSetKeyValues, OpDriverLightingConfig, OpDriverFrame,
+        };
 
         // ---------------- CRC16/CCITT-FALSE (poly 0x1021, init 0xFFFF, no reflection, no xorout) -------------
 
@@ -100,8 +121,8 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
             if (arg3 != 0) p[2] = arg3;
             if (chunkOffset.HasValue)
             {
-                // Multi-packet transfer: offset (LE, bytes 2..3), chunk length at byte 5 for 0x27 (GK6X
-                // "long offset" ops) and at byte 4 for 0x22. Matches GK6X WritePacket.
+                // Multi-packet transfer: offset (LE, bytes 2..3), chunk length at byte 5 for 0x27, 0x16 and
+                // 0x1A (GK6X "long offset" ops) and at byte 4 for 0x22. Matches GK6X WritePacket.
                 int off = chunkOffset.Value;
                 if (off < 0 || off > 0xFFFF) throw new ArgumentOutOfRangeException(nameof(chunkOffset));
                 p[2] = (byte)off;
@@ -173,6 +194,24 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
             // GetWrittenBuffer() returns Length - 1 bytes (the alpha byte of slot 175 is dropped).
             // That truncated stream is the format GK6X users have run on real boards, so we send it unchanged.
             return data.AsSpan(0, data.Length - 1).ToArray();
+        }
+
+        /// <summary>
+        /// Live frame payload from slot colours in EncodeColour format (only the first 132 slots are used):
+        /// R, G, B, 100 per slot, as the vendor app sends them. Brightness is already in the colour.
+        /// </summary>
+        public static byte[] BuildLiveFrame(uint[] slotColours)
+        {
+            byte[] data = new byte[LiveSlots * 4];
+            for (int i = 0; i < LiveSlots; i++)
+            {
+                uint c = i < slotColours.Length ? slotColours[i] : 0;
+                data[i * 4] = (byte)c;
+                data[i * 4 + 1] = (byte)(c >> 8);
+                data[i * 4 + 2] = (byte)(c >> 16);
+                data[i * 4 + 3] = 100;
+            }
+            return data;
         }
 
         public static uint EncodeColour(byte r, byte g, byte b)
