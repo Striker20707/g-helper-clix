@@ -30,12 +30,20 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
         /// </summary>
         public static bool DoubleBuffer => AppConfig.Get("clix_double_buffer", 1) != 0;
         public const byte BufferA = 2, BufferB = 3;
+        /// <summary>
+        /// Fn+R (4): given the normal key table and black lighting once, then "off" is just a switch to it
+        /// (0B 04, a few ms) and "on" a switch back. Without it, off/on each rewrite the colours (about 1.2 s).
+        /// </summary>
+        public const byte DarkProfile = 4;
+        public static bool DarkLayer => AppConfig.Get("clix_dark_layer", 1) != 0;
 
         // Power states, like G-Helper's laptop backlight options (Extra > Laptop Backlight). Default: lit.
         public static bool Awake { get => AppConfig.Get("clix_awake", 1) != 0; set => AppConfig.Set("clix_awake", value ? 1 : 0); }
         public static bool AwakeOnBattery { get => AppConfig.Get("clix_awake_bat", AppConfig.Get("clix_awake", 1)) != 0; set => AppConfig.Set("clix_awake_bat", value ? 1 : 0); }
         public static bool Sleep { get => AppConfig.Get("clix_sleep", 1) != 0; set => AppConfig.Set("clix_sleep", value ? 1 : 0); }
         public static bool BootShutdown { get => AppConfig.Get("clix_boot", 1) != 0; set => AppConfig.Set("clix_boot", value ? 1 : 0); }
+        /// <summary>Lights off while the display is off (idle timeout), back on with it. Default on.</summary>
+        public static bool OffWithDisplay { get => AppConfig.Get("clix_display_off", 1) != 0; set => AppConfig.Set("clix_display_off", value ? 1 : 0); }
 
         /// <summary>Master switch: "gk6x_keyboard": 0 in config.json disables all Clix support.</summary>
         public static bool Enabled => AppConfig.Get("gk6x_keyboard", 1) != 0;
@@ -65,7 +73,11 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
         private static bool verifiedThisSession;
         private static volatile bool selectOnNextWrite;
         private static volatile bool asleep;
+        private static volatile bool displayOff;
         private static volatile bool shuttingDown;
+        /// <summary>Layer selected by the last 0B this session (0 = unknown).</summary>
+        private static byte lastSelected;
+        private static bool darkLayerFailed;
 
         private static readonly Gk6xCoalescer coalescer = new(WriteOnce, DebounceMs, MinWriteIntervalMs, Fail);
 
@@ -128,30 +140,51 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
         internal static void Disconnected(Gk6xClix clix)
         {
             lock (stateLock) if (ReferenceEquals(current, clix)) current = null;
+            lastSelected = 0;
         }
 
         // ---------------- Power hooks (sleep, wake, shutdown, charger) ----------------
 
         public static void OnSuspend() { asleep = true; ApplyPowerNow(); }
-        public static void OnResume() { asleep = false; PowerChanged(); }
+        public static void OnResume() { asleep = false; displayOff = false; PowerChangedNow(); }
+        public static void OnDisplayOff() { displayOff = true; PowerChangedNow(); }
+        public static void OnDisplayOn() { displayOff = false; PowerChangedNow(); }
         public static void OnShutdown() { shuttingDown = true; ApplyPowerNow(); }
-        /// <summary>Charger plugged/unplugged, or a power option changed in Extra.</summary>
-        public static void PowerChanged()
+        /// <summary>Charger plugged/unplugged, or a power option changed in Extra or the keyboard window.</summary>
+        public static void PowerChanged() => PowerChangedNow();
+
+        /// <summary>On/off is a layer switch, so it skips the colour debounce and runs at once (off the UI thread).</summary>
+        private static void PowerChangedNow()
         {
             lock (stateLock) if (current is null) return;
-            coalescer.Request();
+            System.Threading.Tasks.Task.Run(ApplyPowerNow);
+        }
+
+        /// <summary>Laptop lighting changed (any G-Helper aura mode): follow its main colour when "Sync with laptop" is on.</summary>
+        public static event Action? LaptopAuraApplied;
+
+        public static void LaptopAuraChanged()
+        {
+            Gk6xClix? clix;
+            lock (stateLock) clix = current;
+            if (clix is null || !PeripheralsProvider.IsKeyboardAuraSync) return;
+            try { LaptopAuraApplied?.Invoke(); } catch { }
+            System.Threading.Tasks.Task.Run(() => { try { clix.SyncFromLaptopAura(); } catch (Exception e) { Logger.WriteLine("GK6X: laptop sync failed: " + e.Message); } });
         }
 
         /// <summary>Lit, unless asleep / shutting down / on battery with the matching option unticked.</summary>
         public static bool ShouldBeLit()
         {
             if (shuttingDown) return Gk6xSettings.BootShutdown;
+            // Display off comes first: Windows turns the display off before it sleeps, and the lights should not
+            // come back on for the sleep itself.
+            if (displayOff && Gk6xSettings.OffWithDisplay) return false;
             if (asleep) return Gk6xSettings.Sleep;
             bool onBattery = System.Windows.Forms.SystemInformation.PowerStatus.PowerLineStatus == System.Windows.Forms.PowerLineStatus.Offline;
             return onBattery ? Gk6xSettings.AwakeOnBattery : Gk6xSettings.Awake;
         }
 
-        /// <summary>Suspend and shutdown can't wait for the debounce: write synchronously (about 1.2 s).</summary>
+        /// <summary>Suspend and shutdown can't wait for the debounce: switch synchronously (a few ms with the dark layer).</summary>
         private static void ApplyPowerNow()
         {
             try { WriteOnce(); } catch (Exception e) { Logger.WriteLine("GK6X: power change failed: " + e.Message); }
@@ -181,7 +214,7 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
         /// <summary>One time per layer: write the main layer's key table so the layer types normally.</summary>
         private static bool EnsureNormalKeys(Gk6xKeyboard kb, Gk6xIdentity id, byte profile)
         {
-            string stamp = $"{id.ModelId}:{id.FirmwareId:X8}:normal-v1";
+            string stamp = KeysStamp(id);
             if (AppConfig.GetString(KeysKey(profile)) == stamp) return true;
             try
             {
@@ -198,12 +231,17 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
             }
         }
 
+        private static bool UseDarkLayer => Gk6xSettings.DarkLayer && !darkLayerFailed;
+
         private static bool WriteLocked(Gk6xClix target)
         {
-            // Lit: the adapter's colours. Off: black. Either way it is just content for the buffers.
-            uint[] slots = ShouldBeLit() ? target.SnapshotSlots() : new uint[Gk6xProtocol.StaticSlots];
+            bool lit = ShouldBeLit();
+            bool dark = !lit && UseDarkLayer;
+            // Lit (or dark layer in use): the buffers hold the colours. No dark layer: "off" writes black.
+            uint[] slots = lit || dark ? target.SnapshotSlots() : new uint[Gk6xProtocol.StaticSlots];
             var id = target.Identity;
             string stamp = $"{id.ModelId}:{id.FirmwareId:X8}:" + Hash(slots);
+            string blackStamp = $"{id.ModelId}:{id.FirmwareId:X8}:" + Hash(new uint[Gk6xProtocol.StaticSlots]);
             bool dbl = UseDoubleBuffer;
             byte active = ActiveProfile;
             byte other = dbl ? (active == Gk6xSettings.BufferA ? Gk6xSettings.BufferB : Gk6xSettings.BufferA) : Gk6xSettings.BufferA;
@@ -215,8 +253,15 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
             if (!primary && dbl && AppConfig.GetString(StampKey(other)) != stamp) writeTo = other;
             bool hiddenSync = !primary && writeTo != 0;
             byte shown = primary ? writeTo : active;
-            bool select = primary ? (dbl || Gk6xSettings.AutoSelectProfile) : selectOnNextWrite && Gk6xSettings.AutoSelectProfile;
-            if (writeTo == 0 && !select) { SetStatus("Up to date", false); return false; }
+
+            bool needDark = dark && (AppConfig.GetString(StampKey(Gk6xSettings.DarkProfile)) != blackStamp
+                                     || AppConfig.GetString(KeysKey(Gk6xSettings.DarkProfile)) != KeysStamp(id));
+            byte showLayer = dark ? Gk6xSettings.DarkProfile : shown;
+            bool select = dark ? lastSelected != Gk6xSettings.DarkProfile
+                        : primary ? (dbl || Gk6xSettings.AutoSelectProfile)
+                        : (selectOnNextWrite || lastSelected == Gk6xSettings.DarkProfile) && Gk6xSettings.AutoSelectProfile
+                          || lastSelected == Gk6xSettings.DarkProfile;
+            if (writeTo == 0 && !select && !needDark) { SetStatus(lit ? "Up to date" : "Lights off", false); return false; }
 
             var transport = Gk6xHidTransport.TryOpenPath(target.DevicePath);
             if (transport is null) { Fail("keyboard not reachable (unplugged?)"); return false; }
@@ -226,6 +271,20 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
             kb.AssumeIdentity(id, target.Model);
             long t0 = Environment.TickCount64;
 
+            // Off: switch first, so the lights go out at once; colour writes (if any) follow in the background.
+            if (dark)
+            {
+                if (needDark && !PrepareDarkLayer(kb, id, blackStamp))
+                {
+                    darkLayerFailed = true;
+                    Logger.WriteLine("GK6X: dark layer unavailable, lights off will rewrite the colours");
+                    SetStatus("Retrying", false);
+                    System.Threading.Tasks.Task.Run(() => coalescer.Request());
+                    return false;
+                }
+                if (select) { kb.SelectProfile(Gk6xSettings.DarkProfile); lastSelected = Gk6xSettings.DarkProfile; }
+            }
+
             if (writeTo != 0 && !EnsureNormalKeys(kb, id, writeTo))
             {
                 if (writeTo == Gk6xSettings.BufferA) { Fail("could not set up Fn+W's keys"); return false; }
@@ -234,7 +293,7 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
                 dbl = false;
                 writeTo = primary ? Gk6xSettings.BufferA : (byte)0;
                 shown = Gk6xSettings.BufferA;
-                if (writeTo == 0) { SetStatus("Up to date", false); return false; }
+                if (!dark) showLayer = shown;
             }
 
             if (writeTo != 0)
@@ -247,20 +306,50 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
             }
 
             // Selecting a layer is what makes the keyboard show it (the vendor app and GK6X both do this).
-            if (select)
+            if (!dark && select)
             {
                 selectOnNextWrite = false;
-                kb.SelectProfile(shown);
+                kb.SelectProfile(showLayer);
+                lastSelected = showLayer;
             }
             if (primary) ActiveProfile = shown;
 
+            // Get Fn+R ready in the background the first time, so the first "off" is already instant.
+            if (lit && UseDarkLayer && writeTo == 0 &&
+                (AppConfig.GetString(StampKey(Gk6xSettings.DarkProfile)) != blackStamp || AppConfig.GetString(KeysKey(Gk6xSettings.DarkProfile)) != KeysStamp(id))
+                && !PrepareDarkLayer(kb, id, blackStamp))
+                darkLayerFailed = true;
+
             Logger.WriteLine($"GK6X: {(writeTo != 0 ? $"profile {writeTo} written{(hiddenSync ? " (hidden copy)" : "")}" : "no write")}" +
-                             $"{(select ? $", profile {shown} selected" : "")} in {Environment.TickCount64 - t0} ms");
-            SetStatus(writeTo != 0 ? "Applied" : "Up to date", false);
+                             $"{(select ? $", profile {showLayer} selected" : "")}{(dark ? " (lights off)" : "")} in {Environment.TickCount64 - t0} ms");
+            SetStatus(dark || !lit ? "Lights off" : writeTo != 0 ? "Applied" : "Up to date", false);
 
             // After a visible change, update the hidden copy once things are quiet.
             if (primary && dbl) _ = System.Threading.Tasks.Task.Delay(StaleSyncDelayMs).ContinueWith(_ => coalescer.Request());
             return writeTo != 0;
+        }
+
+        private static string KeysStamp(Gk6xIdentity id) => $"{id.ModelId}:{id.FirmwareId:X8}:normal-v1";
+
+        /// <summary>One time: Fn+R gets the normal key table and black lighting, so "off" is a layer switch.</summary>
+        private static bool PrepareDarkLayer(Gk6xKeyboard kb, Gk6xIdentity id, string blackStamp)
+        {
+            const byte p = Gk6xSettings.DarkProfile;
+            if (!EnsureNormalKeys(kb, id, p)) return false;
+            if (AppConfig.GetString(StampKey(p)) == blackStamp) return true;
+            try
+            {
+                AppConfig.Set(StampKey(p), "");
+                kb.SetLighting(p, new uint[Gk6xProtocol.StaticSlots], true, Gk6xSettings.ChunkDelayMs);
+                AppConfig.Set(StampKey(p), blackStamp);
+                Logger.WriteLine("GK6X: Fn+R prepared as the lights-off layer");
+                return true;
+            }
+            catch (Gk6xException e)
+            {
+                Logger.WriteLine("GK6X: Fn+R black write failed: " + e.Message);
+                return false;
+            }
         }
 
         private static string Hash(uint[] slots)

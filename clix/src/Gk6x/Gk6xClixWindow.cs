@@ -1,4 +1,9 @@
-// Extras for the Matrix Clix in G-Helper's shared keyboard window (Custom mode):
+// Extras for the Matrix Clix in G-Helper's shared keyboard window:
+//   * clearer names: "Single colour" / "Per key" instead of Static / Custom; no animation speed (the Clix
+//     modes here are all solid), and in its place "Turn off when the display turns off"
+//   * with "Sync with laptop" on: the colour swatch shows the laptop's colour, the paint row is hidden,
+//     and the disabled mode box is greyed out so it doesn't look clickable
+// In Per key mode:
 //   * drag across keys to paint them (not just one click per key)
 //   * right-click a key: pick its colour, paint its row, the red keys, everything but the red keys,
 //     letters, number row, or the whole board; the same group menu opens from a right-click on Fill All
@@ -34,13 +39,93 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
         public static IEnumerable<int> NumberRowLeds => Group((n, r) => r == 0 && n != "Esc" && n != "Bksp");
         public static IEnumerable<int> RowLeds(int row) => Group((_, r) => r == row);
 
+        public const string SingleColourName = "Single colour";
+        public const string PerKeyName = "Per key";
+
         public static void Extend(AsusKeyboardSettings form)
         {
+            form.ClixHidePaintWhenSynced = true;
+            var state = new FormState();
+            form.ClixVisualized += () => { try { Fixup(form, state); } catch { } };
+            Action laptop = () => { try { if (form.IsHandleCreated) form.BeginInvoke(() => Fixup(form, state)); } catch { } };
+            Gk6xKeyboards.LaptopAuraApplied += laptop;
+            form.FormClosed += (_, _) => Gk6xKeyboards.LaptopAuraApplied -= laptop;
             form.Shown += (_, _) =>
             {
-                try { Attach(form); }
+                try { RenameModes(form); AddDisplayOption(form, state); Fixup(form, state); Attach(form); }
                 catch (Exception e) { Logger.WriteLine("GK6X: window extras not added: " + e.Message); }
             };
+        }
+
+        private sealed class FormState
+        {
+            public CheckBox? DisplayOff;
+            public Color? OwnColour;
+            public Color? ModeForeColor;
+        }
+
+        private static void RenameModes(AsusKeyboardSettings form)
+        {
+            ComboBox combo = form.ClixModeCombo;
+            var modes = form.ClixKeyboard.SupportedLightingModes();
+            for (int i = 0; i < combo.Items.Count && i < modes.Length; i++)
+            {
+                if (modes[i] == KeyboardLightingMode.Static) combo.Items[i] = SingleColourName;
+                else if (modes[i] == KeyboardLightingMode.Direct) combo.Items[i] = PerKeyName;
+            }
+        }
+
+        private static void AddDisplayOption(AsusKeyboardSettings form, FormState state)
+        {
+            CheckBox sync = form.ClixSyncCheck;
+            Control label = form.ClixSpeedLabel;
+            var box = new CheckBox
+            {
+                Text = "Turn off when the display turns off",
+                AutoSize = true,
+                Font = sync.Font,
+                ForeColor = sync.ForeColor,
+                BackColor = sync.BackColor,
+                Margin = sync.Margin,
+                Padding = sync.Padding,
+                UseVisualStyleBackColor = sync.UseVisualStyleBackColor,
+                Checked = Gk6xSettings.OffWithDisplay,
+            };
+            box.CheckedChanged += (_, _) => { Gk6xSettings.OffWithDisplay = box.Checked; Gk6xKeyboards.PowerChanged(); };
+            label.Parent!.Controls.Add(box);
+            state.DisplayOff = box;
+        }
+
+        private static void Fixup(AsusKeyboardSettings form, FormState state)
+        {
+            // No animation speed: the row is used for the display option instead.
+            Control label = form.ClixSpeedLabel, speed = form.ClixSpeedCombo;
+            label.Visible = speed.Visible = false;
+            if (state.DisplayOff is { } box)
+            {
+                box.Left = form.ClixSyncCheck.Left;
+                box.Top = label.Top + (speed.Bottom - label.Top - box.Height) / 2;
+                box.Visible = true;
+            }
+
+            bool synced = form.ClixSyncCheck.Checked;
+            ComboBox mode = form.ClixModeCombo;
+            state.ModeForeColor ??= mode.ForeColor;
+            mode.ForeColor = mode.Enabled ? state.ModeForeColor.Value : SystemColors.GrayText;
+
+            // The colour swatch shows the colour the keyboard actually has.
+            var swatch = form.ClixLightingColorButton;
+            if (synced)
+            {
+                state.OwnColour ??= swatch.SwatchColor;
+                swatch.SwatchColor = Color.FromArgb(255, Color.FromArgb(AppConfig.Get("aura_color")));
+            }
+            else if (state.OwnColour is { } own)
+            {
+                swatch.SwatchColor = own;
+                state.OwnColour = null;
+            }
+            swatch.Invalidate();
         }
 
         private static void Attach(AsusKeyboardSettings form)

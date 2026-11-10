@@ -24,9 +24,10 @@ Colours apply when you let go of the colour picker or click a key.
 | Sleep | `clix_sleep` (1) | Lights off at sleep and display off, back on at wake |
 | Boot/Shutdown | `clix_boot` (1) | Lights off at shutdown, so the keyboard starts dark until G-Helper runs |
 
-"Off" is black written into the hidden buffer layer, then a switch to it, so it is instant; "on" does the
-same with the colours. Each is one write of about 1.2 s (stored in the keyboard's flash), so the defaults
-keep the lights on and nothing is written unless you untick an option.
+"Off" is a switch to Fn+R (`0B 04`, a few ms), which G-Helper gives the normal key table and black lighting
+once, in the background after the first colour write (`clix_dark_layer`, default 1). "On" switches back.
+Power events skip the colour debounce. "Turn off when the display turns off" (`clix_display_off`, default 1)
+is in the keyboard window; it wins over the Sleep option, because Windows turns the display off before sleeping.
 
 Other config keys: `clix_autoselect` (1, switch to the G-Helper layer on connect and after each write),
 `clix_double_buffer` (1, alternate Fn+W / Fn+E so the keyboard's wipe-before-write is never visible),
@@ -54,7 +55,7 @@ driver's own data (`device/655491246/data/profile_offline_1-3.json` in Matrix Dr
 Fn+Q, or the same combo again, goes back to profile 1. G-Helper writes the main layer's key table into
 Fn+W and Fn+E once (`21 pp 01`, then 9 x `22 pp` with 120 key values from the vendor's
 `profile.json`; hardware test 2026-11-10: every reply status 00), stamped in `gk6x_keys_p2/p3`, and then
-uses both for lighting. Fn+R is refused in code. Undo: `experiments/Gk6xFnWKeysTest.ps1 -Arrows`
+uses both for lighting. Fn+R gets the same keys and stays black (the lights-off layer); Fn+R is never used for colours. Undo: `experiments/Gk6xFnWKeysTest.ps1 -Arrows`
 (Fn+W) or Fn+Esc+Q (everything). Profile 1 cannot be written: its lighting is a fixed firmware bank (hardware test
 2026-11-10: `21 01 03` and `24 01` refused with F0), and it is refused in code too.
 

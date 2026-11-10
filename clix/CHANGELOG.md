@@ -4,6 +4,16 @@ Each release on this fork is named after the official G-Helper version it is bui
 v0.291), because G-Helper's updater compares that number. A rebuild of the same version replaces the
 files in that release, so the "Clix build" number below is what tells builds apart.
 
+## Clix build 7
+- Lights on/off is now instant (sleep, display off, Awake/Battery ticks). Fn+R is prepared once in the
+  background (normal keys, black lighting), and off is just a switch to it. Set `clix_dark_layer` to 0 to
+  turn this off.
+- New: "Turn off when the display turns off" (on by default), in the keyboard window where Animation
+  Speed was. Animation Speed is gone, since every Clix mode here is solid.
+- Modes are now called "Single colour" and "Per key".
+- Sync with laptop follows every laptop lighting change (it missed some before). The colour swatch shows
+  the laptop's colour while synced, the paint row hides, and the greyed-out mode box no longer looks clickable.
+
 ## Clix build 6
 - No more dark flash when you change a colour. Writes go to whichever of Fn+W / Fn+E isn't showing, then
   the keyboard switches to it. Lights off works the same way, so it's instant too.

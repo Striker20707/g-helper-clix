@@ -268,10 +268,9 @@ static class Program
             kb.Identify();
             int before = fk.Writes.Count;
             T.Throws<Gk6xException>(() => kb.SetStaticColour(1, 255, 0, 0), "main profile (1, holds the Fn+\\ effects) is refused");
-            T.Check(Gk6xKeyboard.WritableLightingProfiles.SequenceEqual(new byte[] { 2, 3 }), "writable: Fn+W (2) and Fn+E (3), the two buffers");
-            T.Throws<Gk6xException>(() => kb.SetStaticColour(4, 255, 0, 0), "Fn+R (4, command lock layer) is refused");
+            T.Check(Gk6xKeyboard.WritableLightingProfiles.SequenceEqual(new byte[] { 2, 3, 4 }), "writable: Fn+W / Fn+E buffers and Fn+R (lights-off layer)");
             T.Throws<Gk6xException>(() => kb.SetNormalKeys(1), "main layer key table is never written");
-            T.Throws<Gk6xException>(() => kb.SetNormalKeys(4), "Fn+R key table is never written");
+            T.Throws<Gk6xException>(() => kb.SetNormalKeys(5), "driver layer key table is never written");
             T.Check(fk.Writes.Count == before, "refused profiles: nothing sent");
             T.Throws<Gk6xException>(() => kb.SelectProfile(0), "profile 0 out of range");
             T.Throws<Gk6xException>(() => kb.SelectProfile(5), "profile 5 (driver/online mode) refused");
@@ -389,7 +388,9 @@ static class Program
             kb.SetLighting(2, new uint[Gk6xProtocol.StaticSlots]);
             kb.SelectProfile(2);
             T.Check(fk.Writes[before][1] == 0x21 && fk.Writes[before][2] == 2 && fk.Writes.Last()[1] == 0x0B && fk.Writes.Last()[2] == 2, "lights off = black into Fn+W, then select");
-            T.Throws<Gk6xException>(() => kb.SetLighting(4, new uint[Gk6xProtocol.StaticSlots]), "Fn+R is never written");
+            kb.SetLighting(4, new uint[Gk6xProtocol.StaticSlots]);
+            kb.SelectProfile(4);
+            T.Check(fk.Writes.Last()[1] == 0x0B && fk.Writes.Last()[2] == 4, "Fn+R can be blacked out and selected (lights-off layer)");
 
             // normal keys for a buffer layer: 21 pp 01, then 9 x 22 pp with the Clix table (matches the hardware test)
             before = fk.Writes.Count;

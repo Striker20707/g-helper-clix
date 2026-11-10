@@ -149,8 +149,11 @@ def main():
     # 4. Power: sleep / wake (system and display, as G-Helper does for the laptop keyboard), shutdown, charger
     insert_after(settings, find_line(settings, 'Logger.WriteLine("System Suspend");'), K + "Gk6xKeyboards.OnSuspend();")
     insert_after(settings, find_line(settings, 'Logger.WriteLine("System Resume");'), K + "Gk6xKeyboards.OnResume();")
-    insert_after(settings, find_line(settings, 'Logger.WriteLine("Monitor Power Off");'), K + "Gk6xKeyboards.OnSuspend();")
-    insert_after(settings, find_line(settings, 'Logger.WriteLine("Monitor Power On");'), K + "Gk6xKeyboards.OnResume();")
+    insert_after(settings, find_line(settings, 'Logger.WriteLine("Monitor Power Off");'), K + "Gk6xKeyboards.OnDisplayOff();")
+    insert_after(settings, find_line(settings, 'Logger.WriteLine("Monitor Power On");'), K + "Gk6xKeyboards.OnDisplayOn();")
+    # Laptop lighting changed (every aura mode passes here): "Sync with laptop" follows it
+    insert_after(app / "USB" / "Aura.cs", find_line(app / "USB" / "Aura.cs", 'SetColor2(AppConfig.Get("aura_color2"));'),
+                 K + "Gk6xKeyboards.LaptopAuraChanged();")
     insert_after(program, _block_open(program, "private static void SystemEvents_SessionEnding("), K + "Gk6xKeyboards.OnShutdown();")
     insert_after(program, find_line(program, "PowerLineStatus status = SystemInformation.PowerStatus.PowerLineStatus;"),
                  K + "Gk6xKeyboards.PowerChanged();")
@@ -167,12 +170,22 @@ def main():
     for name, why in [("private Color[] keyColors", "per-key colours"), ("private Color paintColor;", "paint colour"),
                       ("private void RefreshKeyGrid()", "redraw after a group paint"), ("private KeyboardLightingMode SelectedMode()", "Custom mode check"),
                       ("buttonPaintColor.SwatchColor = c;", "paint colour swatch"), ("checkBoxSyncAura.Checked", "sync check"),
-                      ("settingsChanged = true;", "save on close")]:
+                      ("settingsChanged = true;", "save on close"),
+                      ("labelAnimationSpeed", "replaced by the display option"), ("buttonLightingColor.SwatchColor", "colour swatch")]:
         require(kbs, name, why)
     insert_block_before(kbs, "        private void ButtonFillAll_Click(object? sender, EventArgs e)", [
         "        // G-Helper Clix: access for the Matrix Clix key grid extras (Gk6xClixWindow)",
         "        internal Panel ClixKeyPanel => panelKeys;",
         "        internal Control ClixFillAllButton => buttonFillAll;",
+        "        internal ComboBox ClixModeCombo => comboBoxLightingMode;",
+        "        internal Control ClixSpeedLabel => labelAnimationSpeed;",
+        "        internal Control ClixSpeedCombo => comboBoxAnimationSpeed;",
+        "        internal CheckBox ClixSyncCheck => checkBoxSyncAura;",
+        "        internal GHelper.UI.RColorButton ClixLightingColorButton => buttonLightingColor;",
+        "        internal GHelper.UI.RColorButton ClixPaintColorButton => buttonPaintColor;",
+        "        internal bool ClixHidePaintWhenSynced;",
+        "        internal AsusKeyboard ClixKeyboard => keyboard;",
+        "        internal event Action? ClixVisualized;",
         "        internal bool ClixCanPaint => !checkBoxSyncAura.Checked && SelectedMode() == KeyboardLightingMode.Direct;",
         "        internal Color ClixPaintColor { get => paintColor; set { paintColor = value; buttonPaintColor.SwatchColor = value; } }",
         "        internal Color ClixKeyColor(int led) => led >= 0 && led < keyColors.Length ? keyColors[led] : Color.Black;",
@@ -189,6 +202,11 @@ def main():
         "        }",
         "",
     ])
+    # after every refresh of the controls (mode change, sync toggle, load), let the Clix add-on adjust them
+    insert_after(kbs, find_line(kbs, "            UpdatePreviewTimer();"), "ClixVisualized?.Invoke();")
+    # with "Sync with laptop" on, the paint row is hidden instead of shown disabled (Clix only)
+    replace_once(kbs, "bool custom = grid && SelectedMode() == KeyboardLightingMode.Direct;",
+                 "bool custom = grid && SelectedMode() == KeyboardLightingMode.Direct && !(ClixHidePaintWhenSynced && checkBoxSyncAura.Checked);")
     insert_after(kbs, find_line(kbs, "            FormClosing += AsusKeyboardSettings_FormClosing;"),
                  "if (keyboard is " + K + "Gk6xClix) " + K + "Gk6xClixWindow.Extend(this);")
 
