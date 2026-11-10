@@ -7,13 +7,32 @@ same tile and the same settings window as ROG keyboards. Code: `app/Peripherals/
 
 | Control | Effect on the Clix |
 |---|---|
-| Lighting Mode: Static + Color | Every key that colour |
-| Lighting Mode: Custom | Per-key colours: pick a colour or palette swatch, click keys, or Fill All |
+| Lighting Mode: Single colour + Color | Every key that colour |
+| Lighting Mode: Breathing / Colour cycle / Rainbow wave | Drawn live by G-Helper, with Animation Speed (Breathing fades Color to Color 2) |
+| Lighting Mode: Per key | Per-key colours: pick a colour or palette swatch, click or drag across keys, or Fill All |
 | Brightness (Lighting header slider) | 0 to 100 % of the colours |
-| Sync with laptop | Uses the laptop keyboard's colour (G-Helper's shared setting for all external keyboards) |
+| Sync with laptop | Copies the laptop keyboard's effect and colours: Static, Breathe, Color Cycle, Rainbow, Strobe, Star; streamed modes (Ambient, Heatmap, Audio...) show their live colour |
 
 The on-screen keyboard is the Clix's 60% layout (61 keys, from GK6X `Data/device/655491246/data/keymap.js`).
 Colours apply when you let go of the colour picker or click a key.
+
+## Live lighting (driver mode, `clix_live`, default 1)
+
+While G-Helper runs, one background thread keeps the keyboard in driver mode, the vendor app's "online"
+profile: `0C` ping, `0B 05`, the normal key table for driver mode (`16 01` x 9, so typing is unchanged) and
+software lighting (`17 01 240 1 18 3 0 0 0 0 15`). Each frame is `1A 01` x 10 (132 slots x R,G,B,100 by
+LocationCode) and `1A 02`. A frame takes about 54 ms (hardware test 2026-11-10: 18 fps, typing fine).
+Frames go out when the colours change and at up to 20 per second while an effect animates; a ping goes out
+at least every 0.9 s (the keyboard leaves driver mode by itself when the pings stop).
+
+Nothing in a frame is stored. The stored layers stay the fallback: 3 s after the last change the colours
+are written to the colour layer (Fn+W/Fn+E) on the same open handle, without switching layers, and Fn+R is
+kept black. If the keyboard refuses that in driver mode, the write waits until live mode ends.
+
+G-Helper leaves driver mode itself (selects Fn+R when the lights should be off, else the colour layer) before
+display off, sleep, shutdown and exit (`ProcessExit` / `Application.ApplicationExit`). After three failures in
+a row live mode is off for the session and everything works as stored-only. Animated effects show their
+main colour in the stored layer.
 
 ## Power (Extra > Laptop Backlight > "Matrix Clix" row)
 
@@ -63,8 +82,8 @@ The vendor driver writes these same per-layer lighting tables (it calls them "Mo
 layers with the same select command, so G-Helper is doing what the official app does, in C#.
 
 The keyboard stores the colour and the selected profile itself. Both survive unplugging and rebooting
-(confirmed by the owner 2026-11-10). G-Helper holds no handle and runs no thread between writes, and
-it does no polling.
+(confirmed by the owner 2026-11-10). With `clix_live` 0, G-Helper holds no handle and runs no thread
+between writes, and it does no polling.
 
 Writes are coalesced (120 ms debounce). A write is skipped when the stamp in `gk6x_stamp_p2`
 (model, firmware, colours) matches. A failed write clears the stamp. The first write after each
@@ -86,7 +105,7 @@ Reports and replies:
 * Report layout: report id 0, then a 64-byte packet: `[0] op, [1] sub, [2..5] args/offset/length, [6..7] CRC16 LE, [8..63] data`.
 * CRC16/CCITT-FALSE (poly 0x1021, init 0xFFFF) over the packet with bytes 6..7 zeroed.
 * A reply must match the op and pass the CRC check. Info replies must also echo the sub and carry result 1 at byte 2.
-* Unrelated reports (Fn notifications) are skipped, up to 8 per request. Timeout is 500 ms.
+* Unrelated reports (Fn notifications, key reports in driver mode) are skipped, up to 64 per request. Timeout is 500 ms.
 
 | Step | Bytes | Required reply status (byte 1) |
 |---|---|---|
@@ -94,6 +113,11 @@ Reports and replies:
 | Clear profile 2 lighting | `21 02 06` | 00 or 01 (F0 = refused, abort) |
 | Write | `27 02` × 22 chunks, 10 ms apart | 01 for every chunk |
 | Select / reload | `0B 02` | echoes 02 |
+| Live: ping | `0C` | any (00) |
+| Live: driver mode | `0B 05` | echoes 05 |
+| Live: key table | `16 01` x 9 (length at byte 5) | 00 or 01 |
+| Live: lighting config | `17 01` + 9 data bytes | 00 or 01 |
+| Live: frame | `1A 01` x 10 (length at byte 5), then `1A 02` | 00/01, then 02 |
 
 The 1219-byte lighting blob consists of:
 * A 32 × 16-byte effect table: entry 0 = {512, 1, 0, 0}, the rest -1.
@@ -102,8 +126,8 @@ The 1219-byte lighting blob consists of:
 
 As in GK6X, the final byte is not sent.
 
-Only opcodes 01, 0B, 21 and 27 can be built (`Gk6xProtocol.AllowedOpcodes`). Restart, realtime
-lighting, key, macro and Fn writes, and firmware commands are unreachable.
+Only opcodes 01, 0B, 21, 27, 22 (stored lighting and key table) and 0C, 16, 17, 1A (live mode) can be built
+(`Gk6xProtocol.AllowedOpcodes`). Restart, macro and Fn writes, and firmware commands are unreachable.
 
 ## Hooks (inserted by `clix/apply_patch.py`)
 
@@ -111,6 +135,10 @@ lighting, key, macro and Fn writes, and firmware commands are unreachable.
   which registers the Clix through `PeripheralsProvider.Connect()`.
 * `Settings.cs` system suspend/resume and display off/on, `Program.cs` session ending and power-line change: power states.
 * `Extra.cs`: the "Matrix Clix" power row.
+* `USB/Aura.cs` after each laptop apply: `Gk6xKeyboards.LaptopAuraChanged()`; `PeripheralsProvider.StreamKeyboardColor`:
+  `Gk6xKeyboards.StreamColor()` (streamed laptop modes).
+* `AsusKeyboardSettings.cs`: internal accessors for the Clix window extras, and the rows under the lighting
+  mode are laid out by `Gk6xClixWindow` (speed only for animated modes, then the display option).
 * `AutoUpdate/AutoUpdateControl.cs`: update check points at this fork. Window title, tray tooltip and icons are marked.
 
 No ASUS class, packet or detector is changed. The Clix never receives ASUS packets: `Gk6xClix` intercepts them.

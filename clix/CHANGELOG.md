@@ -4,6 +4,20 @@ Each release on this fork is named after the official G-Helper version it is bui
 v0.291), because G-Helper's updater compares that number. A rebuild of the same version replaces the
 files in that release, so the "Clix build" number below is what tells builds apart.
 
+## Clix build 8
+- Live lighting: while G-Helper runs, the Clix shows G-Helper's colours directly, like the vendor app's
+  online mode. Changes appear instantly (as fast as the laptop keyboard), with no flash and nothing written
+  per change. A few seconds after the last change the colours are also stored in Fn+W, so the keyboard keeps
+  them when G-Helper isn't running. Set `clix_live` to 0 in config.json to go back to stored-only (build 7).
+- Sync with laptop now copies the laptop's effect, not just its colour: Breathe, Color Cycle, Rainbow,
+  Strobe and Star are drawn on the Clix, restarting with the laptop's so they line up. Streamed laptop modes
+  (Ambient, Heatmap, Battery, GPU, Audio, Gradient) show their live colour too.
+- New Clix modes in the keyboard window: Breathing (colour 1 to colour 2), Colour cycle and Rainbow wave.
+  Animation Speed is back, but only for those three; "Turn off when the display turns off" sits below it.
+- Before display off, sleep, shutdown or quitting G-Helper, it leaves live mode itself and switches to Fn+R
+  (lights off) or Fn+W (your stored colours), so there is no blue breathing. If live mode fails three times
+  in a row it turns itself off for the session and the stored layers are used as in build 7.
+
 ## Clix build 7
 - Lights on/off is now instant (sleep, display off, Awake/Battery ticks). Fn+R is prepared once in the
   background (normal keys, black lighting), and off is just a switch to it. Set `clix_dark_layer` to 0 to
