@@ -24,12 +24,20 @@ Colours apply when you let go of the colour picker or click a key.
 | Sleep | `clix_sleep` (1) | Lights off at sleep and display off, back on at wake |
 | Boot/Shutdown | `clix_boot` (1) | Lights off at shutdown, so the keyboard starts dark until G-Helper runs |
 
-"Off" is black written into Fn+W, and "on" writes the colours back. Each is one write of about 1.2 s
-(stored in the keyboard's flash), so the defaults keep the lights on and nothing is written unless you
-untick an option.
+"Off" is black written into the hidden buffer layer, then a switch to it, so it is instant; "on" does the
+same with the colours. Each is one write of about 1.2 s (stored in the keyboard's flash), so the defaults
+keep the lights on and nothing is written unless you untick an option.
 
-Other config keys: `clix_autoselect` (1, switch to Fn+W on connect and after each write),
+Other config keys: `clix_autoselect` (1, switch to the G-Helper layer on connect and after each write),
+`clix_double_buffer` (1, alternate Fn+W / Fn+E so the keyboard's wipe-before-write is never visible),
 `clix_chunk_delay` (10 ms). `"gk6x_keyboard": 0` turns all Clix support off.
+
+## Profiles and painting
+
+The window's profile selector is enabled for the Clix: "Default" and Profile 1-5 are six saved lighting
+setups in G-Helper's config (`kb_Gk6xClix_p{n}_*`). The keyboard only ever holds the current one.
+In Custom mode you can drag across keys to paint them, and right-click a key (or Fill All) for groups:
+this row, red keys, everything but the red keys, letters, number row, all keys, or "Use this key's colour".
 
 ## Where the lighting lives
 
@@ -43,8 +51,11 @@ driver's own data (`device/655491246/data/profile_offline_1-3.json` in Matrix Dr
 | Fn+E | `1`..`=` become F1-F12 | normal |
 | Fn+R | U PrtSc, I ScrLk, O Pause, J Ins, K Home, L PgUp, M Del, `,` End, `.` PgDn | normal |
 
-Fn+Q, or the same combo again, goes back to profile 1. G-Helper only writes profile 2 (Fn+W) and refuses
-3 and 4 in code. Profile 1 cannot be written: its lighting is a fixed firmware bank (hardware test
+Fn+Q, or the same combo again, goes back to profile 1. G-Helper writes the main layer's key table into
+Fn+W and Fn+E once (`21 pp 01`, then 9 x `22 pp` with 120 key values from the vendor's
+`profile.json`; hardware test 2026-11-10: every reply status 00), stamped in `gk6x_keys_p2/p3`, and then
+uses both for lighting. Fn+R is refused in code. Undo: `experiments/Gk6xFnWKeysTest.ps1 -Arrows`
+(Fn+W) or Fn+Esc+Q (everything). Profile 1 cannot be written: its lighting is a fixed firmware bank (hardware test
 2026-11-10: `21 01 03` and `24 01` refused with F0), and it is refused in code too.
 
 The vendor driver writes these same per-layer lighting tables (it calls them "ModeLE") and switches

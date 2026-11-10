@@ -7,7 +7,8 @@
 //                                                already brightness-scaled. They are intercepted in
 //                                                WriteForResponse and never reach the keyboard.
 //   SaveLighting  ("50 55")                   -> acknowledged; the keyboard stores every write anyway.
-//   anything else (key bindings, profiles, battery queries) -> refused (null), nothing is sent.
+//   ProfileSet    ("51 00")                   -> acknowledged; the profile's stored lighting is applied.
+//   anything else (key bindings, battery queries) -> refused (null), nothing is sent.
 
 using GHelper.USB;
 using HidSharp;
@@ -50,7 +51,10 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
         public override bool HasBattery() => false;
         public override bool HasAutoPowerOff() => false;
         public override bool HasLowBatteryWarning() => false;
-        public override bool HasProfiles() => false;
+        // Saved setups ("Default" + Profile 1-5) live in G-Helper's config, one set of lighting settings each,
+        // using the shared window's own profile selector. Switching applies that profile's lighting.
+        public override bool HasProfiles() => true;
+        public override int ProfileCount() => 6;
         public override bool HasKeyBindings() => false;
         public override bool HasPerKeyRGB() => true;
         public override int MediaKeyCount() => 0;
@@ -65,6 +69,7 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
         // ---- Connection: identified by Gk6xKeyboards.Detect(); no ASUS handshake ----
         public override void Connect()
         {
+            RestoreProfile();
             SetDeviceReady(true);
             DeviceList.Local.Changed += DeviceList_Changed;
         }
@@ -135,6 +140,19 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
 
             // Save lighting: every Clix write is already stored by the keyboard
             if (packet[1] == 0x50 && packet[2] == 0x55) return ack;
+
+            // Profile switch (51 00 00 00 n): G-Helper sets Profile right after this returns, then the window
+            // reloads; apply the new profile's stored lighting once that has happened.
+            if (packet[1] == 0x51 && packet[2] == 0x00 && packet.Length >= 6)
+            {
+                int wanted = packet[5];
+                System.Threading.Tasks.Task.Run(async () =>
+                {
+                    for (int i = 0; i < 20 && Profile != wanted; i++) await System.Threading.Tasks.Task.Delay(25);
+                    if (Profile == wanted && !PeripheralsProvider.IsKeyboardAuraSync) ApplyStoredLighting();
+                });
+                return ack;
+            }
 
             return null;
         }

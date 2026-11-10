@@ -12,6 +12,7 @@
     <Compile Include="../src/Gk6x/Gk6xProtocol.cs" />
     <Compile Include="../src/Gk6x/Gk6xKeyboard.cs" />
     <Compile Include="../src/Gk6x/Gk6xCoalescer.cs" />
+    <Compile Include="../src/Gk6x/Gk6xKeyTables.cs" />
 
   </ItemGroup>
 </Project>

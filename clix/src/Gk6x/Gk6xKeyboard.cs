@@ -52,13 +52,13 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
 
         /// <summary>
         /// Onboard profiles: 1 = main (blue breathing, Fn+] and Fn+\ effects), 2 = Fn+W, 3 = Fn+E, 4 = Fn+R.
-        /// Profiles 2-4 are also key layers (vendor data profile_offline_1-3.json): Fn+W = arrow lock
-        /// (/ RAlt Menu RCtrl become arrows), Fn+E = F-key lock, Fn+R = command lock (U I O J K L M , .).
-        /// G-Helper only ever writes lighting to profile 2. Profile 1 is never writable: that would erase the
-        /// Fn+\ effect list. 3 and 4 are refused so a bug can't send the keyboard into a layer that changes keys.
+        /// Profiles 2-4 are also key layers in the factory setup (vendor data profile_offline_1-3.json): Fn+W =
+        /// arrow lock, Fn+E = F-key lock, Fn+R = command lock. G-Helper writes the main layer's key table into
+        /// 2 and 3 (SetNormalKeys) so they type normally, then uses them for lighting. Profile 1 is never
+        /// writable (its lighting is a fixed firmware bank) and 4 is left alone.
         /// </summary>
         public const byte GHelperProfile = 2;
-        public static readonly byte[] WritableLightingProfiles = { GHelperProfile };
+        public static readonly byte[] WritableLightingProfiles = { GHelperProfile, 3 };
 
         public const int ReplyTimeoutMs = 500;
         /// <summary>Unsolicited reports (e.g. Fn notifications) tolerated while waiting for one reply.</summary>
@@ -70,6 +70,8 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
         //   21 xx 06 clear accepted -> 00, 27 chunk accepted -> 01, unsupported request -> F0.
         public static bool ClearAccepted(byte status) => status == 0x00 || status == 0x01;
         public static bool ChunkAccepted(byte status) => status == 0x01;
+        // 22 key chunks accepted -> 00 (hardware test 2026-11-10).
+        public static bool KeyChunkAccepted(byte status) => status == 0x00 || status == 0x01;
 
         private readonly IGk6xTransport transport;
         private readonly Action<string> log;
@@ -172,6 +174,35 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
                     n++;
                     p = SendAndAck(report, Gk6xProtocol.OpLayerSetLightValues);
                     if (!ChunkAccepted(p[1])) throw new Gk6xException($"keyboard refused lighting chunk {n} (status 0x{p[1]:X2})");
+                    if (chunkDelayMs > 0) sleep(chunkDelayMs);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Makes a layer type like the main layer: 21 pp 01 (clear its key table), then 22 pp chunks with the
+        /// model's normal key table. Only for the Matrix Clix table (120 keys) and only profiles 2 and 3.
+        /// Fn combos (the Fn table, 0x31) are not touched.
+        /// </summary>
+        public void SetNormalKeys(byte profile, int chunkDelayMs = ChunkDelayMs)
+        {
+            lock (ioLock)
+            {
+                if (Model is null || Identity is null) throw new Gk6xException("keyboard model not verified; refusing key write");
+                if (Array.IndexOf(WritableLightingProfiles, profile) < 0)
+                    throw new Gk6xException($"profile {profile} key table is not writable by G-Helper");
+                uint[] keys = Gk6xKeyTables.MatrixClixNormalKeys;
+                if (Identity.BufferSizeA * Identity.BufferSizeB != keys.Length)
+                    throw new Gk6xException($"key table size {Identity.BufferSizeA}x{Identity.BufferSizeB} does not match the Clix table");
+
+                byte[] p = Exchange(Gk6xProtocol.OpLayerResetDataType, profile, false, Gk6xProtocol.DataTypeKeySet);
+                if (!ClearAccepted(p[1])) throw new Gk6xException($"keyboard refused key table clear (status 0x{p[1]:X2})");
+                int n = 0;
+                foreach (byte[] report in Gk6xProtocol.BuildChunkedReports(Gk6xProtocol.OpLayerSetKeyValues, profile, Gk6xProtocol.BuildKeyPayload(keys)))
+                {
+                    n++;
+                    p = SendAndAck(report, Gk6xProtocol.OpLayerSetKeyValues);
+                    if (!KeyChunkAccepted(p[1])) throw new Gk6xException($"keyboard refused key chunk {n} (status 0x{p[1]:X2})");
                     if (chunkDelayMs > 0) sleep(chunkDelayMs);
                 }
             }

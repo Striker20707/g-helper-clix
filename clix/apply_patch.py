@@ -51,6 +51,17 @@ def insert_before(path, anchor, line):
     print(f"hooked {path.name}: before {anchor.strip()!r}")
 
 
+def insert_block_before(path, anchor, lines):
+    """Inserts several lines (already indented) before an anchor line that must appear exactly once."""
+    s = read(path)
+    n = s.count(anchor)
+    if n != 1:
+        fail(f"anchor found {n} times (expected 1) in {path.name}: {anchor.strip()!r}")
+    nl = "\r\n" if "\r\n" in s[:4000] else "\n"
+    write(path, s.replace(anchor, nl.join(lines) + nl + anchor))
+    print(f"hooked {path.name}: {len(lines)} lines before {anchor.strip()!r}")
+
+
 def replace_once(path, old, new):
     s = read(path)
     n = s.count(old)
@@ -149,6 +160,37 @@ def main():
         require(app / "Extra.Designer.cs", f"{name} = new ", "template for the Matrix Clix power row")
     insert_before(extra, find_line(extra, "            InitTheme();"),
                   K + "Gk6xPowerRow.Add(tableBacklight, labelBacklightKeyboard, checkAwake, checkSleep, checkBoot, checkBattery);")
+
+    # 5b. Matrix Clix extras in the shared keyboard window: drag to paint, key groups, colour picker from a key.
+    #     A few internal members give the add-on access to the window's paint colour and key colours.
+    kbs = app / "AsusKeyboardSettings.cs"
+    for name, why in [("private Color[] keyColors", "per-key colours"), ("private Color paintColor;", "paint colour"),
+                      ("private void RefreshKeyGrid()", "redraw after a group paint"), ("private KeyboardLightingMode SelectedMode()", "Custom mode check"),
+                      ("buttonPaintColor.SwatchColor = c;", "paint colour swatch"), ("checkBoxSyncAura.Checked", "sync check"),
+                      ("settingsChanged = true;", "save on close")]:
+        require(kbs, name, why)
+    insert_block_before(kbs, "        private void ButtonFillAll_Click(object? sender, EventArgs e)", [
+        "        // G-Helper Clix: access for the Matrix Clix key grid extras (Gk6xClixWindow)",
+        "        internal Panel ClixKeyPanel => panelKeys;",
+        "        internal Control ClixFillAllButton => buttonFillAll;",
+        "        internal bool ClixCanPaint => !checkBoxSyncAura.Checked && SelectedMode() == KeyboardLightingMode.Direct;",
+        "        internal Color ClixPaintColor { get => paintColor; set { paintColor = value; buttonPaintColor.SwatchColor = value; } }",
+        "        internal Color ClixKeyColor(int led) => led >= 0 && led < keyColors.Length ? keyColors[led] : Color.Black;",
+        "        internal void ClixPaint(IEnumerable<int> leds)",
+        "        {",
+        "            if (!ClixCanPaint) return;",
+        "            bool changed = false;",
+        "            foreach (int led in leds)",
+        "                if (led >= 0 && led < keyColors.Length && keyColors[led].ToArgb() != paintColor.ToArgb()) { keyColors[led] = paintColor; changed = true; }",
+        "            if (!changed) return;",
+        "            settingsChanged = true;",
+        "            RefreshKeyGrid();",
+        "            Task.Run(() => { try { keyboard.SetLedColors(keyColors); } catch { } });",
+        "        }",
+        "",
+    ])
+    insert_after(kbs, find_line(kbs, "            FormClosing += AsusKeyboardSettings_FormClosing;"),
+                 "if (keyboard is " + K + "Gk6xClix) " + K + "Gk6xClixWindow.Extend(this);")
 
     # 6. Point G-Helper's own updater at this fork's releases
     upd = app / "AutoUpdate" / "AutoUpdateControl.cs"

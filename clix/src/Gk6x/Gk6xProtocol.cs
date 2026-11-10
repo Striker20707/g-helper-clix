@@ -32,6 +32,8 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
         public const byte OpSetLayer = 0x0B;
         public const byte OpLayerResetDataType = 0x21;
         public const byte OpLayerSetLightValues = 0x27;
+        /// <summary>Key table of a layer: one u32 key value per LogicCode (GK6X SetKeys).</summary>
+        public const byte OpLayerSetKeyValues = 0x22;
 
         // OpInfo sub-commands
         public const byte InfoFirmwareId = 0x01;
@@ -40,6 +42,7 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
 
         public const byte LayerBase = 1;
         public const byte DataTypeLighting = 6;
+        public const byte DataTypeKeySet = 1;
 
         /// <summary>Static lighting: one uint per key slot (UserDataFile.LightingEffect.NumStaticLightingBytes).</summary>
         public const int StaticSlots = 176;
@@ -48,7 +51,7 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
         public const ushort EffectTypeStatic = 0;
 
         /// <summary>The only opcodes this module is allowed to send. Tests assert against this.</summary>
-        public static readonly byte[] AllowedOpcodes = { OpInfo, OpSetLayer, OpLayerResetDataType, OpLayerSetLightValues };
+        public static readonly byte[] AllowedOpcodes = { OpInfo, OpSetLayer, OpLayerResetDataType, OpLayerSetLightValues, OpLayerSetKeyValues };
 
         // ---------------- CRC16/CCITT-FALSE (poly 0x1021, init 0xFFFF, no reflection, no xorout) -------------
 
@@ -97,13 +100,13 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
             if (arg3 != 0) p[2] = arg3;
             if (chunkOffset.HasValue)
             {
-                // Multi-packet transfer: offset (LE, bytes 2..3, high byte at 5 is shadowed by length for
-                // the <64 KiB transfers used here), chunk length at byte 5. Matches GK6X WritePacket for 0x27.
+                // Multi-packet transfer: offset (LE, bytes 2..3), chunk length at byte 5 for 0x27 (GK6X
+                // "long offset" ops) and at byte 4 for 0x22. Matches GK6X WritePacket.
                 int off = chunkOffset.Value;
                 if (off < 0 || off > 0xFFFF) throw new ArgumentOutOfRangeException(nameof(chunkOffset));
                 p[2] = (byte)off;
                 p[3] = (byte)(off >> 8);
-                p[5] = (byte)chunk.Length;
+                p[op == OpLayerSetKeyValues ? 4 : 5] = (byte)chunk.Length;
             }
             chunk.CopyTo(p.Slice(8));
             ushort crc = PacketCrc(p);
@@ -124,6 +127,14 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
                 list.Add(count > 1 ? BuildReport(op, sub, 0, chunk, off) : BuildReport(op, sub, 0, chunk));
             }
             return list;
+        }
+
+        /// <summary>Key table payload: each value as u32 little-endian, in LogicCode order.</summary>
+        public static byte[] BuildKeyPayload(uint[] keys)
+        {
+            byte[] data = new byte[keys.Length * 4];
+            for (int i = 0; i < keys.Length; i++) BitConverter.TryWriteBytes(data.AsSpan(i * 4), keys[i]);
+            return data;
         }
 
         /// <summary>

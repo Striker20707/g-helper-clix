@@ -101,6 +101,7 @@ sealed class FakeKeyboard : IGk6xTransport
     public readonly List<byte[]> Writes = new();
     readonly Queue<byte[]> replies = new();
     public uint ModelId = 656801979, FirmwareId = 0x90219010;
+    public byte BufA = 4, BufB = 4;
     public Fault Fault; public byte? FaultOnOp; public int UnsolicitedBeforeEachReply;
     public bool Disposed; public int IncomingCrcErrors;
 
@@ -113,7 +114,7 @@ sealed class FakeKeyboard : IGk6xTransport
         for (int i = 0; i < UnsolicitedBeforeEachReply; i++) replies.Enqueue(Make(0x18, 0, 1, new byte[] { 0, 5, 1 })); // DriverKeyCallback-like
         byte op = report[1], sub = report[2];
         byte[] data = new byte[8];
-        if (op == 0x01 && sub == 0x09) data = new byte[] { 4, 4 };
+        if (op == 0x01 && sub == 0x09) data = new byte[] { BufA, BufB };
         if (op == 0x01 && sub == 0x01) { data = new byte[6]; BitConverter.GetBytes(FirmwareId).CopyTo(data, 0); data[4] = 19; data[5] = 1; }
         if (op == 0x01 && sub == 0x08)
         {
@@ -124,7 +125,7 @@ sealed class FakeKeyboard : IGk6xTransport
         }
         // Replies as observed on the real Matrix Clix: packet byte 1 is the status for writes
         // (21 clear -> 00, 27 chunk -> 01, unsupported -> F0); 0B echoes the profile; info echoes the sub.
-        byte status = op switch { 0x21 => 0x00, 0x27 => 0x01, 0x0B => sub, _ => sub };
+        byte status = op switch { 0x21 => 0x00, 0x27 => 0x01, 0x22 => 0x00, 0x0B => sub, _ => sub };
         byte[] r = Make(op, status, 1, data);
         bool hit = FaultOnOp is null || FaultOnOp == op;
         if (hit)
@@ -214,7 +215,7 @@ static class Program
         T.Check(Gk6xProtocol.Scale(200, 100, 50, 150) == (200, 100, 50), "clamped at 100%");
 
         // ---- Forbidden opcodes can't be built ----
-        foreach (byte op in new byte[] { 0x03, 0x04, 0x0C, 0x15, 0x16, 0x17, 0x1A, 0x22, 0x25, 0x26, 0x31, 0xFF })
+        foreach (byte op in new byte[] { 0x03, 0x04, 0x0C, 0x15, 0x16, 0x17, 0x1A, 0x25, 0x26, 0x31, 0xFF })
             T.Throws<InvalidOperationException>(() => Gk6xProtocol.BuildReport(op, 0), $"opcode 0x{op:X2} refused");
 
         // ---- Identify, unknown model: no lighting writes ----
@@ -267,9 +268,10 @@ static class Program
             kb.Identify();
             int before = fk.Writes.Count;
             T.Throws<Gk6xException>(() => kb.SetStaticColour(1, 255, 0, 0), "main profile (1, holds the Fn+\\ effects) is refused");
-            T.Check(Gk6xKeyboard.WritableLightingProfiles.SequenceEqual(new byte[] { 2 }), "writable: only Fn+W (2)");
-            T.Throws<Gk6xException>(() => kb.SetStaticColour(3, 255, 0, 0), "Fn+E (3, F-key lock layer) is refused");
+            T.Check(Gk6xKeyboard.WritableLightingProfiles.SequenceEqual(new byte[] { 2, 3 }), "writable: Fn+W (2) and Fn+E (3), the two buffers");
             T.Throws<Gk6xException>(() => kb.SetStaticColour(4, 255, 0, 0), "Fn+R (4, command lock layer) is refused");
+            T.Throws<Gk6xException>(() => kb.SetNormalKeys(1), "main layer key table is never written");
+            T.Throws<Gk6xException>(() => kb.SetNormalKeys(4), "Fn+R key table is never written");
             T.Check(fk.Writes.Count == before, "refused profiles: nothing sent");
             T.Throws<Gk6xException>(() => kb.SelectProfile(0), "profile 0 out of range");
             T.Throws<Gk6xException>(() => kb.SelectProfile(5), "profile 5 (driver/online mode) refused");
@@ -367,7 +369,7 @@ static class Program
         {
             Gk6xKeyboard.SupportedModels.Clear();
             Gk6xKeyboard.SupportedModels.Add(ShippedModel);
-            var fk = new FakeKeyboard { ModelId = 655491246, FirmwareId = 0x90206111 };
+            var fk = new FakeKeyboard { ModelId = 655491246, FirmwareId = 0x90206111, BufA = 15, BufB = 8 };
             var sleeps = new List<int>();
             var kb = new Gk6xKeyboard(fk, null, ms => sleeps.Add(ms));
             kb.Identify();
@@ -388,6 +390,25 @@ static class Program
             kb.SelectProfile(2);
             T.Check(fk.Writes[before][1] == 0x21 && fk.Writes[before][2] == 2 && fk.Writes.Last()[1] == 0x0B && fk.Writes.Last()[2] == 2, "lights off = black into Fn+W, then select");
             T.Throws<Gk6xException>(() => kb.SetLighting(4, new uint[Gk6xProtocol.StaticSlots]), "Fn+R is never written");
+
+            // normal keys for a buffer layer: 21 pp 01, then 9 x 22 pp with the Clix table (matches the hardware test)
+            before = fk.Writes.Count;
+            kb.SetNormalKeys(3, 0);
+            var kw = fk.Writes.Skip(before).ToList();
+            T.Check(kw.Count == 10 && kw[0][1] == 0x21 && kw[0][2] == 3 && kw[0][3] == 1, "key write starts with 21 03 01 (clear key table only)");
+            T.Check(kw.Skip(1).All(w => w[1] == 0x22 && w[2] == 3), "then 9 x 22 03");
+            T.Check(kw.Skip(1).Select((w, i) => w[3] | (w[4] << 8)).SequenceEqual(Enumerable.Range(0, 9).Select(i => i * 56)), "22 chunk offsets 0, 56, ... 448");
+            T.Check(kw.Skip(1).Select(w => (int)w[5]).SequenceEqual(Enumerable.Repeat(56, 8).Append(32)), "22 chunk length at byte 4 (56 x 8, then 32)");
+            T.Check(kw.Skip(1).All(w => w[6] == 0), "byte 5 stays 0 for 22");
+            T.Check(kw.Skip(1).SelectMany(w => w.Skip(9).Take(w[5])).SequenceEqual(Gk6xProtocol.BuildKeyPayload(Gk6xKeyTables.MatrixClixNormalKeys)), "22 chunks carry the normal key table in order");
+            T.Check(Gk6xKeyTables.MatrixClixNormalKeys.Length == 120 && Gk6xKeyTables.MatrixClixNormalKeys[61] == 0x02003800 && Gk6xKeyTables.MatrixClixNormalKeys[0] == 0xFFFFFFFF,
+                    "table: 120 keys, '/' is '/', Fn left to the firmware");
+            var fkSmall = new FakeKeyboard { ModelId = 655491246, FirmwareId = 0x90206111 };
+            var kbSmall = new Gk6xKeyboard(fkSmall, null, _ => { });
+            kbSmall.Identify();
+            int n0 = fkSmall.Writes.Count;
+            T.Throws<Gk6xException>(() => kbSmall.SetNormalKeys(2), "key table refused when the keyboard reports other buffer sizes");
+            T.Check(fkSmall.Writes.Count == n0, "size mismatch: nothing sent");
 
             // identity reuse: a second connection to the same keyboard skips the info queries
             var fk2 = new FakeKeyboard { ModelId = 655491246, FirmwareId = 0x90206111 };
