@@ -2,7 +2,10 @@
 // settings window as ROG keyboards. Nothing here talks ASUS protocol to the Clix: every lighting call the
 // shared window makes is turned into the Clix's LED table, which Gk6xKeyboards writes to the keyboard.
 //
-//   ApplyLighting (Static / Sync with laptop) -> every key one colour, scaled by brightness
+//   ApplyLighting (Single colour, Breathing, Colour cycle, Rainbow wave) -> a live effect (Gk6xEffects); the
+//                                                stored fallback is every key in the main colour
+//   SyncFromLaptopAura (Sync with laptop)     -> the laptop's own effect, drawn live (Breathe, Colour cycle,
+//                                                Rainbow, Strobe, Star); streamed laptop modes via StreamColour
 //   SetLedColors  (Custom, per key)           -> the base class sends "C0 81" packets with (LED id, R, G, B),
 //                                                already brightness-scaled. They are intercepted in
 //                                                WriteForResponse and never reach the keyboard.
@@ -59,11 +62,19 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
         public override bool HasPerKeyRGB() => true;
         public override int MediaKeyCount() => 0;
         public override int MaxBrightness() => 100;
-        public override KeyboardLightingMode[] SupportedLightingModes() => new[] { KeyboardLightingMode.Static, KeyboardLightingMode.Direct };
-        public override bool SupportsColorSetting(KeyboardLightingMode mode) => mode == KeyboardLightingMode.Static;
-        public override bool SupportsColor2Setting(KeyboardLightingMode mode) => false;
+        // Breathing / Colour cycle / Rainbow wave are drawn by G-Helper (live mode); without live mode they show
+        // the main colour.
+        public override KeyboardLightingMode[] SupportedLightingModes() => new[]
+        {
+            KeyboardLightingMode.Static, KeyboardLightingMode.Breathing, KeyboardLightingMode.ColorCycle,
+            KeyboardLightingMode.Wave, KeyboardLightingMode.Direct,
+        };
+        public override bool SupportsColorSetting(KeyboardLightingMode mode) => mode is KeyboardLightingMode.Static or KeyboardLightingMode.Breathing;
+        public override bool SupportsColor2Setting(KeyboardLightingMode mode) => mode == KeyboardLightingMode.Breathing;
         public override bool SupportsColor3Setting(KeyboardLightingMode mode) => false;
-        public override bool SupportsAnimationSpeed(KeyboardLightingMode mode) => false;
+        public override bool SupportsAnimationSpeed(KeyboardLightingMode mode) => IsAnimated(mode);
+        public static bool IsAnimated(KeyboardLightingMode mode) =>
+            mode is KeyboardLightingMode.Breathing or KeyboardLightingMode.ColorCycle or KeyboardLightingMode.Wave;
         protected override string? LayoutName() => LayoutKey;
 
         // ---- Connection: identified by Gk6xKeyboards.Detect(); no ASUS handshake ----
@@ -107,11 +118,59 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
         // ---- Lighting ----
         public override bool ApplyLighting(KeyboardLightingMode mode, Color color, Color color2, AuraSpeed speed, int brightness)
         {
+            var kind = mode switch
+            {
+                KeyboardLightingMode.Breathing => Gk6xEffectKind.Breathing,
+                KeyboardLightingMode.ColorCycle => Gk6xEffectKind.ColorCycle,
+                KeyboardLightingMode.Wave => Gk6xEffectKind.Wave,
+                _ => Gk6xEffectKind.Solid,
+            };
+            SetEffect(kind, color, color2, speed, brightness, false);
+            return true;
+        }
+
+        /// <summary>
+        /// "Sync with laptop": the laptop's effect and colours from G-Helper's own settings, with the Clix's brightness.
+        /// The animation restarts with every laptop apply, as the laptop's own does.
+        /// </summary>
+        public override bool SyncFromLaptopAura()
+        {
+            var mode = (AuraMode)AppConfig.Get("aura_mode");
+            var kind = mode switch
+            {
+                AuraMode.AuraBreathe => Gk6xEffectKind.Breathing,
+                AuraMode.AuraColorCycle => Gk6xEffectKind.ColorCycle,
+                AuraMode.AuraRainbow => Gk6xEffectKind.Wave,
+                AuraMode.AuraStrobe => Gk6xEffectKind.Strobe,
+                AuraMode.Star => Gk6xEffectKind.Star,
+                _ => Gk6xEffectKind.Solid, // static, and the streamed modes until their first colour arrives
+            };
+            Color c1 = Color.FromArgb(AppConfig.Get("aura_color"));
+            Color c2 = Color.FromArgb(AppConfig.Get("aura_color2"));
+            SetEffect(kind, c1, c2, (AuraSpeed)Math.Clamp(AppConfig.Get("aura_speed", 1), 0, 2), StoredBrightness, true);
+            return true;
+        }
+
+        /// <summary>A colour streamed by a laptop mode (Ambient, Heatmap, Battery, GPU, Audio...): live only, not stored.</summary>
+        public void StreamColour(Color color)
+        {
+            var (r, g, b) = Gk6xProtocol.Scale(color.R, color.G, color.B, StoredBrightness);
+            uint[] frame = new uint[Gk6xProtocol.StaticSlots];
+            Array.Fill(frame, Gk6xProtocol.EncodeColour(r, g, b));
+            Gk6xKeyboards.ShowTransient(Gk6xEffect.Solid(frame));
+        }
+
+        private void SetEffect(Gk6xEffectKind kind, Color color, Color color2, AuraSpeed speed, int brightness, bool restart)
+        {
+            // Stored fallback (and Single colour): every key in the main colour.
             var (r, g, b) = Gk6xProtocol.Scale(color.R, color.G, color.B, brightness);
             uint c = Gk6xProtocol.EncodeColour(r, g, b);
-            lock (slotLock) Array.Fill(slots, c);
-            Gk6xKeyboards.RequestWrite();
-            return true;
+            uint[] snapshot;
+            lock (slotLock) { Array.Fill(slots, c); snapshot = (uint[])slots.Clone(); }
+            var effect = kind == Gk6xEffectKind.Solid
+                ? Gk6xEffect.Solid(snapshot)
+                : new Gk6xEffect(kind, snapshot, (color.R, color.G, color.B), (color2.R, color2.G, color2.B), (int)speed, Math.Clamp(brightness, 0, 100));
+            Gk6xKeyboards.LightingChanged(effect, restart);
         }
 
         protected override byte[]? WriteForResponse(byte[] packet)
@@ -134,7 +193,7 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
                     }
                     FillUnmappedSlots();
                 }
-                Gk6xKeyboards.RequestWrite();
+                Gk6xKeyboards.LightingChanged(Gk6xEffect.Solid(SnapshotSlots()), false);
                 return ack;
             }
 

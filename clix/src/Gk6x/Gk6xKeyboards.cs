@@ -3,15 +3,18 @@
 //  * Detect() identifies the keyboard and registers a Gk6xClix with G-Helper's own keyboard list, so it gets
 //    the same tile and the same settings window (AsusKeyboardSettings) as ROG keyboards: lighting mode,
 //    colour, brightness, "Sync with laptop", and a per-key "Custom" mode with palette and Fill All.
-//  * Lighting lives in onboard profile 2 (Fn+W) and is stored in the keyboard's flash. After each write the
-//    profile is re-selected so the keyboard reloads it (and so the Fn+] blue breathing goes away).
-//  * Writes are coalesced and skipped when nothing changed. All USB work is off the UI thread. No polling.
+//  * While G-Helper runs, the keyboard shows live frames (driver mode, Gk6xLive.cs): instant changes and
+//    animated effects. The colours are also stored in onboard profile 2/3 (Fn+W/Fn+E) as the fallback, and
+//    Fn+R is kept black as the lights-off layer.
+//  * Without live mode (turned off, or it failed), lighting goes straight to the stored layers as before.
+//  * Stored writes are coalesced and skipped when nothing changed. All USB work is off the UI thread.
 //  * Failures are logged and shown as one G-Helper toast per session.
 
 using GHelper.Helpers;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 
 namespace GHelper.Peripherals.Keyboard.Gk6x
 {
@@ -45,11 +48,17 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
         /// <summary>Lights off while the display is off (idle timeout), back on with it. Default on.</summary>
         public static bool OffWithDisplay { get => AppConfig.Get("clix_display_off", 1) != 0; set => AppConfig.Set("clix_display_off", value ? 1 : 0); }
 
+        /// <summary>
+        /// Live lighting while G-Helper runs (default on): instant changes and animations, nothing stored per frame.
+        /// "clix_live": 0 in config.json uses only the stored layers, as in build 7.
+        /// </summary>
+        public static bool Live => AppConfig.Get("clix_live", 1) != 0;
+
         /// <summary>Master switch: "gk6x_keyboard": 0 in config.json disables all Clix support.</summary>
         public static bool Enabled => AppConfig.Get("gk6x_keyboard", 1) != 0;
     }
 
-    public static class Gk6xKeyboards
+    public static partial class Gk6xKeyboards
     {
         private static string StampKey(byte profile) => $"gk6x_stamp_p{profile}";
         private static string KeysKey(byte profile) => $"gk6x_keys_p{profile}";
@@ -140,7 +149,9 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
         internal static void Disconnected(Gk6xClix clix)
         {
             lock (stateLock) if (ReferenceEquals(current, clix)) current = null;
+            lock (ioGate) DropLiveLocked();
             lastSelected = 0;
+            storedCheckedThisSession = false;
         }
 
         // ---------------- Power hooks (sleep, wake, shutdown, charger) ----------------
@@ -184,14 +195,44 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
             return onBattery ? Gk6xSettings.AwakeOnBattery : Gk6xSettings.Awake;
         }
 
-        /// <summary>Suspend and shutdown can't wait for the debounce: switch synchronously (a few ms with the dark layer).</summary>
+        /// <summary>
+        /// Suspend and shutdown can't wait for the debounce: switch synchronously (a few ms with the dark layer).
+        /// In live mode: leave driver mode on the right layer first; back on, the live thread takes over again.
+        /// </summary>
         private static void ApplyPowerNow()
         {
-            try { WriteOnce(); } catch (Exception e) { Logger.WriteLine("GK6X: power change failed: " + e.Message); }
+            try
+            {
+                Gk6xClix? target;
+                lock (stateLock) target = current;
+                if (target is null) return;
+                bool live = LiveWanted();
+                lock (ioGate)
+                {
+                    if (inLive) { if (!live) LeaveLiveLocked(target); }
+                    else if (!live) WriteLocked(target);
+                }
+                if (live) { frameDirty = true; EnsureLiveThread(); liveWake.Set(); }
+            }
+            catch (Exception e) { Logger.WriteLine("GK6X: power change failed: " + e.Message); }
         }
 
-        /// <summary>The adapter's LED state changed: write it (coalesced).</summary>
-        internal static void RequestWrite() => coalescer.Request();
+        /// <summary>
+        /// The adapter's LED state changed. Live: the live thread shows it now and the stored copy follows after
+        /// LiveStoreDelayMs of quiet. Otherwise: write the stored layers (coalesced).
+        /// </summary>
+        internal static void RequestWrite()
+        {
+            if (LiveWanted())
+            {
+                frameDirty = true;
+                EnsureLiveThread();
+                liveWake.Set();
+                storeTimer.Change(LiveStoreDelayMs, Timeout.Infinite);
+                return;
+            }
+            coalescer.Request();
+        }
 
         // ---------------- Work (background task) ----------------
 
@@ -200,7 +241,12 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
             Gk6xClix? target;
             lock (stateLock) target = current;
             if (target is null) return false;
-            lock (ioGate) return WriteLocked(target);
+            lock (ioGate)
+            {
+                // Never select a layer behind the live thread's back: that would end driver mode.
+                if (inLive) { StoreWhileLiveLocked(target); return false; }
+                return WriteLocked(target);
+            }
         }
 
         private static byte ActiveProfile
@@ -240,8 +286,8 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
             // Lit (or dark layer in use): the buffers hold the colours. No dark layer: "off" writes black.
             uint[] slots = lit || dark ? target.SnapshotSlots() : new uint[Gk6xProtocol.StaticSlots];
             var id = target.Identity;
-            string stamp = $"{id.ModelId}:{id.FirmwareId:X8}:" + Hash(slots);
-            string blackStamp = $"{id.ModelId}:{id.FirmwareId:X8}:" + Hash(new uint[Gk6xProtocol.StaticSlots]);
+            string stamp = SlotsStamp(id, slots);
+            string blackStamp = SlotsStamp(id, new uint[Gk6xProtocol.StaticSlots]);
             bool dbl = UseDoubleBuffer;
             byte active = ActiveProfile;
             byte other = dbl ? (active == Gk6xSettings.BufferA ? Gk6xSettings.BufferB : Gk6xSettings.BufferA) : Gk6xSettings.BufferA;
@@ -328,6 +374,8 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
             if (primary && dbl) _ = System.Threading.Tasks.Task.Delay(StaleSyncDelayMs).ContinueWith(_ => coalescer.Request());
             return writeTo != 0;
         }
+
+        private static string SlotsStamp(Gk6xIdentity id, uint[] slots) => $"{id.ModelId}:{id.FirmwareId:X8}:" + Hash(slots);
 
         private static string KeysStamp(Gk6xIdentity id) => $"{id.ModelId}:{id.FirmwareId:X8}:normal-v1";
 

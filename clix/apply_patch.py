@@ -155,6 +155,9 @@ def main():
     insert_after(app / "USB" / "Aura.cs", find_line(app / "USB" / "Aura.cs", 'SetColor2(AppConfig.Get("aura_color2"));'),
                  K + "Gk6xKeyboards.LaptopAuraChanged();")
     insert_after(program, _block_open(program, "private static void SystemEvents_SessionEnding("), K + "Gk6xKeyboards.OnShutdown();")
+    # Laptop modes that stream a colour (Ambient, Heatmap, Battery, GPU, Audio...): shown live on the Clix too
+    insert_before(prov, find_line(prov, "ForEachAsync(ConnectedKeyboards, kb => kb.WriteColorDirect(color));"),
+                  K + "Gk6xKeyboards.StreamColor(color);")
     insert_after(program, find_line(program, "PowerLineStatus status = SystemInformation.PowerStatus.PowerLineStatus;"),
                  K + "Gk6xKeyboards.PowerChanged();")
 
@@ -186,6 +189,9 @@ def main():
         "        internal bool ClixHidePaintWhenSynced;",
         "        internal AsusKeyboard ClixKeyboard => keyboard;",
         "        internal event Action? ClixVisualized;",
+        "        internal Func<int, int>? ClixLayoutRows;",
+        "        internal KeyboardLightingMode ClixSelectedMode => SelectedMode();",
+        "        internal void ClixRelayout() => LayoutSections();",
         "        internal bool ClixCanPaint => !checkBoxSyncAura.Checked && SelectedMode() == KeyboardLightingMode.Direct;",
         "        internal Color ClixPaintColor { get => paintColor; set { paintColor = value; buttonPaintColor.SwatchColor = value; } }",
         "        internal Color ClixKeyColor(int led) => led >= 0 && led < keyColors.Length ? keyColors[led] : Color.Black;",
@@ -207,6 +213,9 @@ def main():
     # with "Sync with laptop" on, the paint row is hidden instead of shown disabled (Clix only)
     replace_once(kbs, "bool custom = grid && SelectedMode() == KeyboardLightingMode.Direct;",
                  "bool custom = grid && SelectedMode() == KeyboardLightingMode.Direct && !(ClixHidePaintWhenSynced && checkBoxSyncAura.Checked);")
+    # the rows under the lighting mode (speed only for animated modes, plus the display option) are laid out by the Clix add-on
+    replace_once(kbs, "int bottom = comboBoxAnimationSpeed.Bottom + gap;",
+                 "int bottom = (ClixLayoutRows?.Invoke(gap) ?? comboBoxAnimationSpeed.Bottom) + gap;")
     insert_after(kbs, find_line(kbs, "            FormClosing += AsusKeyboardSettings_FormClosing;"),
                  "if (keyboard is " + K + "Gk6xClix) " + K + "Gk6xClixWindow.Extend(this);")
 
