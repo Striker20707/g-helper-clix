@@ -44,11 +44,23 @@ def _dib(im):
     return bytes(out)
 
 
-def write_ico(path, frames):
-    """Like the originals: uncompressed 32-bit frames, PNG only for 256 px."""
+def _entries(data):
+    """(width, height, is_png, offset, size) for each frame, in the file's own order."""
+    if data[:4] != b"\0\0\1\0":
+        raise SystemExit("not an .ico file")
+    n = struct.unpack_from("<H", data, 4)[0]
+    out = []
+    for i in range(n):
+        w, h, _c, _r, _p, _bpp, size, off = struct.unpack_from("<BBBBHHII", data, 6 + 16 * i)
+        out.append((w or 256, h or 256, data[off:off + 4] == b"\x89PNG", off, size))
+    return out
+
+
+def write_ico(path, frames, png_flags):
+    """Same frame order and same encoding per frame (PNG or 32-bit DIB) as the original file."""
     blobs = []
-    for im in frames:
-        if im.size[0] >= 256:
+    for im, is_png in zip(frames, png_flags):
+        if is_png:
             buf = io.BytesIO()
             im.save(buf, format="PNG")
             blobs.append(buf.getvalue())
@@ -65,15 +77,37 @@ def write_ico(path, frames):
         f.write(head + entries + b"".join(blobs))
 
 
+def _check(path, expected):
+    """Re-read the written file with a plain parser: same frames, valid headers, badge pixel present."""
+    data = pathlib.Path(path).read_bytes()
+    got = [(w, h, png) for w, h, png, _o, _s in _entries(data)]
+    if got != expected:
+        raise SystemExit(f"{path}: frames {got} != original {expected}")
+    for w, h, png, off, size in _entries(data):
+        if off + size > len(data):
+            raise SystemExit(f"{path}: frame {w}px runs past end of file")
+        if not png:
+            hdr = struct.unpack_from("<IiiHH", data, off)
+            if hdr != (40, w, h * 2, 1, 32):
+                raise SystemExit(f"{path}: bad DIB header {hdr} for {w}px")
+            if size != 40 + w * h * 4 + ((w + 31) // 32) * 4 * h:
+                raise SystemExit(f"{path}: wrong DIB size for {w}px")
+
+
 def badge_file(path):
-    ico = Image.open(path)
-    sizes = list(ico.info["sizes"])
+    data = pathlib.Path(path).read_bytes()
+    entries = _entries(data)
     frames = []
-    for sz in sizes:
-        ico.size = sz
-        frames.append(badge(ico.copy()).convert("RGBA"))
-    write_ico(path, frames)
-    print(f"badged {pathlib.Path(path).name}: {sorted(sizes)}")
+    for w, h, is_png, off, size in entries:
+        sub = struct.pack("<HHH", 0, 1, 1) + struct.pack("<BBBBHHII", w % 256, h % 256, 0, 0, 1, 32, size, 22) + data[off:off + size]
+        frame = Image.open(io.BytesIO(sub))
+        frame.load()
+        if frame.size != (w, h):
+            raise SystemExit(f"{path}: frame {w}px decoded as {frame.size}")
+        frames.append(badge(frame.convert("RGBA")).convert("RGBA"))
+    write_ico(path, frames, [e[2] for e in entries])
+    _check(path, [(w, h, png) for w, h, png, _o, _s in entries])
+    print(f"badged {pathlib.Path(path).name}: {[(w, 'png' if p else 'bmp') for w, h, p, _o, _s in entries]}")
 
 
 if __name__ == "__main__":
