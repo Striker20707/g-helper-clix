@@ -172,7 +172,7 @@ def main():
     sys.path.insert(0, str(HERE))
     import badge_icons
     for ico in icons:
-        badge_icons.badge_file(ico)
+        badge_icons.badge_file(ico, add_small=ico.name == "favicon.ico")
 
     print("CLIX PATCH APPLIED")
 

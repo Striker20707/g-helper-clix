@@ -25,11 +25,16 @@ def badge(frame):
     d.ellipse((cx - r, cy - r, cx + r, cy + r), fill=BADGE)
     return im.resize((s, s), Image.LANCZOS)
 
-def _dib(im):
-    """32-bit BGRA DIB as stored in .ico files (bottom-up, height doubled, 1-bit AND mask)."""
+def _dib(im, header=None):
+    """32-bit BGRA DIB as stored in .ico files (bottom-up, height doubled, 1-bit AND mask).
+
+    header: the original frame's 40-byte BITMAPINFOHEADER, reused byte for byte so the only change
+    is the pixels (some Windows icon paths are stricter than others about fields like biSizeImage)."""
     w, h = im.size
     px = im.load()
-    out = bytearray(struct.pack("<IiiHHIIiiII", 40, w, h * 2, 1, 32, 0, 0, 0, 0, 0, 0))
+    if header is None:
+        header = struct.pack("<IiiHHIIiiII", 40, w, h * 2, 1, 32, 0, w * h * 4, 0, 0, 0, 0)
+    out = bytearray(header)
     for y in range(h - 1, -1, -1):
         for x in range(w):
             r, g, b, a = px[x, y]
@@ -56,16 +61,17 @@ def _entries(data):
     return out
 
 
-def write_ico(path, frames, png_flags):
+def write_ico(path, frames, png_flags, headers=None):
     """Same frame order and same encoding per frame (PNG or 32-bit DIB) as the original file."""
     blobs = []
-    for im, is_png in zip(frames, png_flags):
+    headers = headers or [None] * len(frames)
+    for im, is_png, hdr in zip(frames, png_flags, headers):
         if is_png:
             buf = io.BytesIO()
             im.save(buf, format="PNG")
             blobs.append(buf.getvalue())
         else:
-            blobs.append(_dib(im))
+            blobs.append(_dib(im, hdr))
     head = struct.pack("<HHH", 0, 1, len(frames))
     offset = 6 + 16 * len(frames)
     entries = b""
@@ -87,14 +93,19 @@ def _check(path, expected):
         if off + size > len(data):
             raise SystemExit(f"{path}: frame {w}px runs past end of file")
         if not png:
-            hdr = struct.unpack_from("<IiiHH", data, off)
-            if hdr != (40, w, h * 2, 1, 32):
+            hdr = struct.unpack_from("<IiiHHI", data, off)
+            if hdr != (40, w, h * 2, 1, 32, 0):
                 raise SystemExit(f"{path}: bad DIB header {hdr} for {w}px")
             if size != 40 + w * h * 4 + ((w + 31) // 32) * 4 * h:
                 raise SystemExit(f"{path}: wrong DIB size for {w}px")
 
 
-def badge_file(path):
+# Small sizes Windows asks for (taskbar, Alt+Tab, Explorer lists). G-Helper's favicon.ico only has
+# 64/128/256, so the shell has to shrink one; these are added (badged, from the largest frame) instead.
+SMALL_SIZES = (48, 32, 24, 16)
+
+
+def badge_file(path, add_small=False):
     data = pathlib.Path(path).read_bytes()
     entries = _entries(data)
     frames = []
@@ -105,11 +116,24 @@ def badge_file(path):
         if frame.size != (w, h):
             raise SystemExit(f"{path}: frame {w}px decoded as {frame.size}")
         frames.append(badge(frame.convert("RGBA")).convert("RGBA"))
-    write_ico(path, frames, [e[2] for e in entries])
-    _check(path, [(w, h, png) for w, h, png, _o, _s in entries])
-    print(f"badged {pathlib.Path(path).name}: {[(w, 'png' if p else 'bmp') for w, h, p, _o, _s in entries]}")
+    headers = [None if png else data[off:off + 40] for _w, _h, png, off, _s in entries]
+    flags = [e[2] for e in entries]
+    expected = [(w, h, png) for w, h, png, _o, _s in entries]
+    if add_small:
+        have = {w for w, _h, _p, _o, _s in entries}
+        big = frames[max(range(len(frames)), key=lambda i: frames[i].size[0])]
+        for sz in SMALL_SIZES:
+            if sz in have:
+                continue
+            frames.append(big.resize((sz, sz), Image.LANCZOS))
+            flags.append(False)
+            headers.append(None)
+            expected.append((sz, sz, False))
+    write_ico(path, frames, flags, headers)
+    _check(path, expected)
+    print(f"badged {pathlib.Path(path).name}: {[(w, 'png' if p else 'bmp') for w, h, p in expected]}")
 
 
 if __name__ == "__main__":
     for p in sys.argv[1:]:
-        badge_file(p)
+        badge_file(p, add_small=pathlib.Path(p).name.lower() == "favicon.ico")

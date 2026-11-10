@@ -4,6 +4,10 @@ Each release on this fork is named after the official G-Helper version it is bui
 v0.291), because G-Helper's updater compares that number. A rebuild of the same version replaces the
 files in that release, so the "Clix build" number below is what tells builds apart.
 
+## Clix build 5
+- App icon: the original icon's bitmap headers are kept byte for byte, and 48/32/24/16 px sizes are
+  added so Windows doesn't have to shrink the 64 px one for the taskbar.
+
 ## Clix build 4
 - Lighting lives only in Fn+W. The Fn+E double buffer and the Fn+R "lights off" slot are gone: those
   layers also change keys (F-key lock, command lock), so using them broke typing.
