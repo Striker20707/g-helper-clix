@@ -1,32 +1,41 @@
 # GK6X-family keyboards (USB 1EA7:0907), e.g. Matrix Clix 60%
 
-The Matrix Clix appears as its own peripheral tile in G-Helper, next to any ASUS mouse, keyboard or
-headset. Clicking the tile opens its settings window. Code: `app/Peripherals/Keyboard/Gk6x/`.
+The Matrix Clix is registered as one of G-Helper's own keyboards (`Gk6xClix : AsusKeyboard`), so it gets the
+same tile and the same settings window as ROG keyboards. Code: `app/Peripherals/Keyboard/Gk6x/`.
 
-## Settings window
+## Keyboard window (G-Helper's own)
 
-| Setting | Config key (default) | Effect |
+| Control | Effect on the Clix |
+|---|---|
+| Lighting Mode: Static + Color | Every key that colour |
+| Lighting Mode: Custom | Per-key colours: pick a colour or palette swatch, click keys, or Fill All |
+| Brightness (Lighting header slider) | 0 to 100 % of the colours |
+| Sync with laptop | Uses the laptop keyboard's colour (G-Helper's shared setting for all external keyboards) |
+
+The on-screen keyboard is the Clix's 60% layout (61 keys, from GK6X `Data/device/655491246/data/keymap.js`).
+Colours apply when you let go of the colour picker or click a key.
+
+## Power (Extra > Laptop Backlight > "Matrix Clix" row)
+
+| Option | Config key (default) | Unticked means |
 |---|---|---|
-| Lights on | `clix_on` (1) | Off writes black to every key |
-| Brightness | `clix_brightness` (100) | 0 to 100 % of the colour |
-| Color | `clix_color` (white) | Colour of every key |
-| Red keys | `clix_keys_mode` (0), `clix_keys_color` | Same as other keys / Off / Own color for the 15 red keycaps |
-| Sync with laptop | `clix_sync` (0) | Uses the laptop's `aura_color` and backlight level (0/1/2/3 = 0/33/66/100 %) instead of the Clix's own colour and brightness |
-| Switch to the G-Helper profile (Fn+W) when it connects | `clix_autoselect` (1) | Sends `0B 02` on connect and after every write |
-| Apply now | | Rewrites the lighting and switches to Fn+W |
+| Awake | `clix_awake` (1) | Lights off while on AC |
+| Battery | `clix_awake_bat` (= Awake) | Lights off while on battery |
+| Sleep | `clix_sleep` (1) | Lights off at sleep and display off, back on at wake |
+| Boot/Shutdown | `clix_boot` (1) | Lights off at shutdown, so the keyboard starts dark until G-Helper runs |
 
-`"gk6x_keyboard": 0` in `%AppData%\GHelper\config.json` turns all Clix support off.
+"Off" is the Fn+R profile (4), written black once (`gk6x_dark_written`). Turning off or on is then just a
+profile switch (`0B 04` / `0B 02`): instant, with no flash write.
 
-Red keys (LocationCode from GK6X `Data/device/655491246/data/keymap.js`): Esc 0, Backspace 14, Tab 22,
-`\` 36, Caps Lock 44, Enter 58, Left Shift 66, Right Shift 80, Left Ctrl 88, Win 89, Left Alt 90,
-Right Alt 98, Menu 99, Right Ctrl 100, Fn 102.
+Other config keys: `clix_autoselect` (1, switch to Fn+W on connect and after writes), `clix_skip_clear` (0),
+`clix_chunk_delay` (10 ms). `"gk6x_keyboard": 0` turns all Clix support off.
 
 ## Where the lighting lives
 
 The keyboard has four onboard profiles: 1 = main (Fn+] blue breathing and the Fn+\ reactive effects),
-2 = Fn+W, 3 = Fn+E, 4 = Fn+R. G-Helper writes lighting **only to profile 2**. Profile 1 cannot be
-written: its lighting is a fixed firmware bank. Hardware test 2026-11-10: `21 01 03` and `24 01` were
-refused with status F0. Profiles 1, 3 and 4 are refused in code.
+2 = Fn+W, 3 = Fn+E, 4 = Fn+R. G-Helper writes its lighting to profile 2 and, once, black to profile 4 (the off state). Profile 1
+cannot be written: its lighting is a fixed firmware bank. Hardware test 2026-11-10: `21 01 03` and
+`24 01` were refused with status F0. Profile 1 is refused in code.
 
 The keyboard stores the colour and the selected profile itself. Both survive unplugging and rebooting
 (confirmed by the owner 2026-11-10). G-Helper holds no handle and runs no thread between writes, and
@@ -72,10 +81,10 @@ lighting, key, macro and Fn writes, and firmware commands are unreachable.
 
 ## Hooks (inserted by `clix/apply_patch.py`)
 
-* `Peripherals/PeripheralsProvider.cs`: Clix added to `AllPeripherals()` and `IsAnyPeripheralConnect()`; `Gk6xKeyboards.Detect()` in the HID device-change handler.
-* `Program.cs`: `Detect()` at startup.
-* `Settings.cs` `ButtonPeripheral_Click`: a Clix tile opens `Gk6xSettingsForm`.
-* `USB/Aura.cs`: `OnLaptopLightingChanged()` after `ApplyAura` and after `ApplyBrightness` for the `"Slider"` and `"HotKey"` labels only. It only acts when Sync with laptop is ticked.
-* `AutoUpdate/AutoUpdateControl.cs`: update check points at this fork.
+* `Peripherals/PeripheralsProvider.cs` HID device-change handler and `Program.cs` startup: `Gk6xKeyboards.Detect()`,
+  which registers the Clix through `PeripheralsProvider.Connect()`.
+* `Settings.cs` system suspend/resume and display off/on, `Program.cs` session ending and power-line change: power states.
+* `Extra.cs`: the "Matrix Clix" power row.
+* `AutoUpdate/AutoUpdateControl.cs`: update check points at this fork. Window title, tray tooltip and icons are marked.
 
-No ASUS class, packet or detector is changed.
+No ASUS class, packet or detector is changed. The Clix never receives ASUS packets: `Gk6xClix` intercepts them.

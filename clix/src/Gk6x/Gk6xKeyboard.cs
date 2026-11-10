@@ -52,11 +52,12 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
 
         /// <summary>
         /// Onboard profiles: 1 = main (blue breathing, Fn+] and Fn+\ effects), 2 = Fn+W, 3 = Fn+E, 4 = Fn+R.
-        /// G-Helper only ever writes lighting to profile 2, which was empty (dark) on the tested keyboard.
-        /// Profile 1 is deliberately not writable here: that would erase the Fn+\ effect list.
+        /// G-Helper writes its lighting to profile 2, which was empty (dark) on the tested keyboard. Profile 3 or 4
+        /// can be written once with black and used as the "lights off" state (switching to it is instant and
+        /// needs no flash write). Profile 1 is never writable: that would erase the Fn+\ effect list.
         /// </summary>
         public const byte GHelperProfile = 2;
-        public static readonly byte[] WritableLightingProfiles = { GHelperProfile };
+        public static readonly byte[] WritableLightingProfiles = { GHelperProfile, 3, 4 };
 
         public const int ReplyTimeoutMs = 500;
         /// <summary>Unsolicited reports (e.g. Fn notifications) tolerated while waiting for one reply.</summary>
@@ -131,23 +132,38 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
         /// </summary>
         public void SetStaticColours(byte profile, (byte r, byte g, byte b) main, (byte r, byte g, byte b)? accent)
         {
+            uint[] slots = new uint[Gk6xProtocol.StaticSlots];
+            Array.Fill(slots, Gk6xProtocol.EncodeColour(main.r, main.g, main.b));
+            if (accent is { } a && Model is not null)
+            {
+                uint ac = Gk6xProtocol.EncodeColour(a.r, a.g, a.b);
+                foreach (int led in Model.AccentLeds)
+                    if (led >= 0 && led < slots.Length) slots[led] = ac;
+            }
+            SetLighting(profile, slots);
+        }
+
+        /// <summary>
+        /// Writes one static effect with a colour per LED slot (index = GK6X LocationCode, values from
+        /// Gk6xProtocol.EncodeColour). clearFirst sends 21 pp 06 before the data, as GK6X and the vendor app do;
+        /// chunkDelayMs is the pause after each chunk.
+        /// </summary>
+        public void SetLighting(byte profile, uint[] slots, bool clearFirst = true, int chunkDelayMs = ChunkDelayMs)
+        {
             lock (ioLock)
             {
                 if (Model is null) throw new Gk6xException("keyboard model not verified; refusing lighting write");
                 if (Array.IndexOf(WritableLightingProfiles, profile) < 0)
                     throw new Gk6xException($"profile {profile} is not writable by G-Helper");
+                if (slots.Length != Gk6xProtocol.StaticSlots) throw new Gk6xException("wrong number of LED slots");
 
-                byte[] p = Exchange(Gk6xProtocol.OpLayerResetDataType, profile, false, Gk6xProtocol.DataTypeLighting);
-                if (!ClearAccepted(p[1])) throw new Gk6xException($"keyboard refused lighting clear (status 0x{p[1]:X2})");
-
-                uint[] slots = new uint[Gk6xProtocol.StaticSlots];
-                Array.Fill(slots, Gk6xProtocol.EncodeColour(main.r, main.g, main.b));
-                if (accent is { } a)
+                byte[] p;
+                if (clearFirst)
                 {
-                    uint ac = Gk6xProtocol.EncodeColour(a.r, a.g, a.b);
-                    foreach (int led in Model.AccentLeds)
-                        if (led >= 0 && led < slots.Length) slots[led] = ac;
+                    p = Exchange(Gk6xProtocol.OpLayerResetDataType, profile, false, Gk6xProtocol.DataTypeLighting);
+                    if (!ClearAccepted(p[1])) throw new Gk6xException($"keyboard refused lighting clear (status 0x{p[1]:X2})");
                 }
+
                 byte[] payload = Gk6xProtocol.BuildStaticLightingPayload(slots);
                 int n = 0;
                 foreach (byte[] report in Gk6xProtocol.BuildChunkedReports(Gk6xProtocol.OpLayerSetLightValues, profile, payload))
@@ -155,9 +171,16 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
                     n++;
                     p = SendAndAck(report, Gk6xProtocol.OpLayerSetLightValues);
                     if (!ChunkAccepted(p[1])) throw new Gk6xException($"keyboard refused lighting chunk {n} (status 0x{p[1]:X2})");
-                    sleep(ChunkDelayMs);
+                    if (chunkDelayMs > 0) sleep(chunkDelayMs);
                 }
             }
+        }
+
+        /// <summary>Marks a keyboard identified earlier (same device path) as verified without re-sending the info queries.</summary>
+        public void AssumeIdentity(Gk6xIdentity identity, Gk6xSupportedModel model)
+        {
+            Identity = identity;
+            Model = SupportedModels.Contains(model) ? model : null;
         }
 
         /// <summary>Switches the keyboard to an onboard profile (same as pressing Fn+W/E/R). Reply echoes the profile.</summary>

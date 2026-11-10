@@ -96,51 +96,73 @@ def main():
     settings = app / "Settings.cs"
     program = app / "Program.cs"
 
-    # 2. Laptop colour changes (only matter when "Sync with laptop" is ticked)
-    insert_after(aura, find_line(aura, 'Logger.WriteLine($"AuraMode: {Mode}");'),
-                 K + "Gk6xKeyboards.OnLaptopLightingChanged();")
+    extra = app / "Extra.cs"
 
-    # 3. Laptop brightness changes by the user (slider + hotkey), never lid/sleep/timeout/ambient
-    insert_after(aura, find_line(aura, "if (brightness == 0) backlight = false;"),
-                 'if (log == "Slider" || log == "HotKey") ' + K + "Gk6xKeyboards.OnLaptopLightingChanged();")
-    # The brightness hook depends on these exact labels. If upstream renames them the hook would
-    # silently stop working, so refuse to build instead.
-    require(app / "Extra.cs", 'Aura.ApplyBrightness(sliderBrightness.Value, "Slider")', "brightness slider label")
-    require(app / "Input" / "InputDispatcher.cs", 'Aura.ApplyBrightness(backlight, "HotKey")', "brightness hotkey label")
-    require(app / "Input" / "InputDispatcher.cs", "public static int GetBacklight()", "used by Gk6xKeyboards.DesiredColour")
-    require(app / "AppConfig.cs", "public static string GetString(string name", "used by Gk6xSettings")
-    require(app / "UI" / "RColorPicker.cs", "public event Action<Color>? ColorChanged;", "used by Gk6xSettingsForm")
-    require(app / "UI" / "RColorPicker.cs", "public RColorPicker(Color initial", "used by Gk6xSettingsForm")
-    require(app / "Peripherals" / "IPeripheral.cs", "public void ReadBattery();", "Gk6xPeripheral implements IPeripheral")
-    require(settings, "public void VisualizePeripherals()", "used to refresh the device tiles")
+    # 2. The Clix is registered as one of G-Helper's own keyboards (Gk6xClix : AsusKeyboard), so the tile,
+    #    the keyboard settings window and "Sync with laptop" are G-Helper's own. These are the members it
+    #    overrides or calls; if upstream changes them the C# build fails too, this just says why earlier.
+    kb = app / "Peripherals" / "Keyboard" / "AsusKeyboard.cs"
+    for text, why in [
+        ("public abstract class AsusKeyboard", "Gk6xClix derives from it"),
+        ("protected AsusKeyboard(ushort vendorId, ushort productId, string path, byte reportId)", "Gk6xClix constructor"),
+        ("protected virtual byte[]? WriteForResponse(byte[] packet)", "per-key colours are intercepted here"),
+        ("public virtual bool ApplyLighting(KeyboardLightingMode mode, Color color, Color color2, AuraSpeed speed, int brightness)", "single colour"),
+        ("public bool SetLedColors(Color[] colors)", "Custom (per-key) mode"),
+        ("packet[1] = 0xC0;", "per-key packet layout read by Gk6xClix"),
+        ("packet[2] = 0x81;", "per-key packet layout read by Gk6xClix"),
+        ("packet[5 + j * 4] = LedId(map, i + j);", "per-key packet layout read by Gk6xClix"),
+        ("new byte[] { reportId, 0x50, 0x55 }", "save command acknowledged by Gk6xClix"),
+        ("public virtual KeyboardLightingMode[] SupportedLightingModes()", "Static + Custom"),
+        ("protected virtual string? LayoutName()", "Matrix Clix 60% layout"),
+        ("public virtual void Connect()", "no ASUS handshake for the Clix"),
+        ("public virtual bool IsDeviceConnected()", "disconnect detection"),
+        ("protected virtual void OnDisconnect()", "disconnect detection"),
+        ("protected void SetDeviceReady(bool ready)", "tile becomes clickable"),
+    ]:
+        require(kb, text, why)
+    require(app / "Peripherals" / "Keyboard" / "AuraKeyboardLayouts.cs",
+            "public static readonly Dictionary<string, LayoutData> Data", "Matrix Clix layout is added at runtime")
+    require(app / "Peripherals" / "Keyboard" / "AuraKeyboardLayouts.cs",
+            "public record LayoutData(List<KeyDef[]> Rows, byte[] LedIds);", "layout format")
+    require(prov, "public static void Connect(AsusKeyboard kb)", "registers the Clix as a keyboard")
+    require(prov, "public static bool IsKeyboardAuraSync", "Sync with laptop")
+    require(prov, "public static List<AsusKeyboard> ConnectedKeyboards", "checked after registering the Clix")
+    require(settings, "ShowKeyboardSettings(kb);", "tile opens the shared keyboard window")
+    require(app / "AppConfig.cs", "public static string GetString(string name", "used by Gk6xKeyboards")
     require(program, "public static ToastForm toast;", "used for failure notifications")
 
-    # 4. Device tile: include the Clix in the peripheral list and "any peripheral connected"
-    insert_after(prov, find_line(prov, "l.AddRange(ConnectedHeadsets);"), "l.AddRange(" + K + "Gk6xKeyboards.Connected);")
-    replace_once(prov, "return IsMouseConnected() || IsKeyboardConnected() || IsHeadsetConnected();",
-                 "return IsMouseConnected() || IsKeyboardConnected() || IsHeadsetConnected() || " + K + "Gk6xKeyboards.Connected.Count > 0;")
-
-    # 5. Detection: HID device-change handler and startup
+    # 3. Detection: HID device-change handler and startup
     insert_after(prov, _timer_anchor(prov), K + "Gk6xKeyboards.Detect();")
     insert_after(program, find_line(program, "PeripheralsProvider.DetectAllAsusHeadsets();"), K + "Gk6xKeyboards.Detect();")
 
-    # 6. Tile click opens the Clix settings window (before the ASUS-specific branches)
-    insert_before(settings, find_line(settings, "if (iph.DeviceType() == PeripheralType.Mouse)"),
-                  "if (iph is " + K + "Gk6xPeripheral clix) { " + K + "Gk6xSettingsForm.Toggle(clix); return; }")
+    # 4. Power: sleep / wake (system and display, as G-Helper does for the laptop keyboard), shutdown, charger
+    insert_after(settings, find_line(settings, 'Logger.WriteLine("System Suspend");'), K + "Gk6xKeyboards.OnSuspend();")
+    insert_after(settings, find_line(settings, 'Logger.WriteLine("System Resume");'), K + "Gk6xKeyboards.OnResume();")
+    insert_after(settings, find_line(settings, 'Logger.WriteLine("Monitor Power Off");'), K + "Gk6xKeyboards.OnSuspend();")
+    insert_after(settings, find_line(settings, 'Logger.WriteLine("Monitor Power On");'), K + "Gk6xKeyboards.OnResume();")
+    insert_after(program, _block_open(program, "private static void SystemEvents_SessionEnding("), K + "Gk6xKeyboards.OnShutdown();")
+    insert_after(program, find_line(program, "PowerLineStatus status = SystemInformation.PowerStatus.PowerLineStatus;"),
+                 K + "Gk6xKeyboards.PowerChanged();")
 
-    # 7. Point G-Helper's own updater at this fork's releases
+    # 5. "Matrix Clix" row under Extra > Laptop Backlight (Awake / Sleep / Boot-Shutdown / Battery)
+    for name in ("tableBacklight", "labelBacklightKeyboard", "checkAwake", "checkSleep", "checkBoot", "checkBattery"):
+        require(app / "Extra.Designer.cs", f"{name} = new ", "template for the Matrix Clix power row")
+    insert_before(extra, find_line(extra, "            InitTheme();"),
+                  K + "Gk6xPowerRow.Add(tableBacklight, labelBacklightKeyboard, checkAwake, checkSleep, checkBoot, checkBattery);")
+
+    # 6. Point G-Helper's own updater at this fork's releases
     upd = app / "AutoUpdate" / "AutoUpdateControl.cs"
     replace_once(upd, '"https://api.github.com/repos/seerge/g-helper/releases/latest"',
                  f'"https://api.github.com/repos/{fork}/releases/latest"')
     replace_once(upd, '"https://github.com/seerge/g-helper/releases"', f'"https://github.com/{fork}/releases"')
 
-    # 8. Show the name "G-Helper Clix" in the window title and tray tooltip. The exe stays GHelper.exe,
+    # 7. Show the name "G-Helper Clix" in the window title and tray tooltip. The exe stays GHelper.exe,
     #    because the updater and the auto-start task look for that file name.
     replace_once(settings, 'Text = "G-Helper " + (ProcessHelper.IsUserAdministrator()',
                  'Text = "G-Helper Clix " + (ProcessHelper.IsUserAdministrator()')
     replace_once(program, 'Text = "G-Helper",', 'Text = "G-Helper Clix",')
 
-    # 9. Pink dot on the app and tray icons, so this build is easy to tell apart from official G-Helper
+    # 8. Pink dot on the app and tray icons, so this build is easy to tell apart from official G-Helper
     icons = [app / "favicon.ico"] + [app / "Resources" / f"{n}.ico" for n in
              ("standard", "eco", "ultimate", "dark-standard", "dark-eco", "light-standard", "light-eco")]
     for ico in icons:
@@ -153,6 +175,21 @@ def main():
         badge_icons.badge_file(ico)
 
     print("CLIX PATCH APPLIED")
+
+
+def _block_open(path, signature):
+    """The signature line plus the '{' line after it, so a line can be inserted at the top of that method."""
+    s = read(path)
+    if s.count(signature) != 1:
+        fail(f"{signature!r} found {s.count(signature)} times in {path.name} (expected 1)")
+    i = s.index(signature)
+    line_start = s.rfind("\n", 0, i) + 1
+    brace = s.find("{", i)
+    line_end = s.find("\n", brace) + 1
+    anchor = s[line_start:line_end]
+    if s[s.find("\n", i) + 1:brace].strip() != "":
+        fail(f"unexpected text between {signature!r} and its opening brace in {path.name}")
+    return anchor
 
 
 def _timer_anchor(prov):

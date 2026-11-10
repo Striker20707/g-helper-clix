@@ -1,167 +1,116 @@
 // G-Helper glue for GK6X-family keyboards (Matrix Clix 60%).
 //
-//  * Shows the keyboard as its own peripheral tile with its own settings window (Gk6xSettingsForm).
-//  * Its colour / brightness / on-off are its own settings, independent of the laptop keyboard, unless the
-//    user ticks "Sync with laptop".
-//  * Lighting lives in onboard profile 2 (Fn+W). The keyboard keeps it in its own memory, so nothing has to
-//    keep running. Optionally G-Helper switches the keyboard to that profile when it connects.
-//  * Writes are coalesced and skipped when nothing changed. All USB work is off the UI thread. No polling:
-//    work happens only on a settings change, a laptop lighting change (when synced) or a HID device event.
-//  * Failures are shown in the settings window and as one G-Helper toast per session, and logged.
+//  * Detect() identifies the keyboard and registers a Gk6xClix with G-Helper's own keyboard list, so it gets
+//    the same tile and the same settings window (AsusKeyboardSettings) as ROG keyboards: lighting mode,
+//    colour, brightness, "Sync with laptop", and a per-key "Custom" mode with palette and Fill All.
+//  * Lighting lives in onboard profile 2 (Fn+W) and is stored in the keyboard's flash. After each write the
+//    profile is re-selected so the keyboard reloads it (and so the Fn+] blue breathing goes away).
+//  * Writes are coalesced and skipped when nothing changed. All USB work is off the UI thread. No polling.
+//  * Failures are logged and shown as one G-Helper toast per session.
 
 using GHelper.Helpers;
-using GHelper.Input;
 using System;
 using System.Collections.Generic;
-using System.Drawing;
 using System.Linq;
 
 namespace GHelper.Peripherals.Keyboard.Gk6x
 {
-    /// <summary>The user's Clix settings, stored in G-Helper's config.json.</summary>
+    /// <summary>Clix options without a control in the shared keyboard window, stored in config.json.</summary>
     public static class Gk6xSettings
     {
-        public static Color Colour
-        {
-            get => Color.FromArgb(AppConfig.Get("clix_color", Color.White.ToArgb()));
-            set => AppConfig.Set("clix_color", value.ToArgb());
-        }
-        /// <summary>0..100 %</summary>
-        public static int Brightness
-        {
-            get => Math.Clamp(AppConfig.Get("clix_brightness", 100), 0, 100);
-            set => AppConfig.Set("clix_brightness", Math.Clamp(value, 0, 100));
-        }
-        public static bool LightsOn
-        {
-            get => AppConfig.Get("clix_on", 1) != 0;
-            set => AppConfig.Set("clix_on", value ? 1 : 0);
-        }
-        public static bool SyncWithLaptop
-        {
-            get => AppConfig.Get("clix_sync", 0) != 0;
-            set => AppConfig.Set("clix_sync", value ? 1 : 0);
-        }
-        public static bool AutoSelectProfile
-        {
-            get => AppConfig.Get("clix_autoselect", 1) != 0;
-            set => AppConfig.Set("clix_autoselect", value ? 1 : 0);
-        }
-        /// <summary>Red keycaps (Esc, Tab, Caps, Shift, Ctrl, Win, Alt, Menu, Fn, Enter, \, Backspace).</summary>
-        public static Gk6xAccentMode AccentMode
-        {
-            get => (Gk6xAccentMode)Math.Clamp(AppConfig.Get("clix_keys_mode", 0), 0, 2);
-            set => AppConfig.Set("clix_keys_mode", (int)value);
-        }
-        public static Color AccentColour
-        {
-            get => Color.FromArgb(AppConfig.Get("clix_keys_color", Color.White.ToArgb()));
-            set => AppConfig.Set("clix_keys_color", value.ToArgb());
-        }
+        /// <summary>Switch the keyboard to Fn+W on connect and after each write (default on).</summary>
+        public static bool AutoSelectProfile => AppConfig.Get("clix_autoselect", 1) != 0;
+        /// <summary>Skip the 21 02 06 clear before writing (only after it is confirmed on hardware).</summary>
+        public static bool SkipClear => AppConfig.Get("clix_skip_clear", 0) != 0;
+        /// <summary>Pause after each lighting chunk in ms (vendor app: 10).</summary>
+        public static int ChunkDelayMs => Math.Clamp(AppConfig.Get("clix_chunk_delay", Gk6xKeyboard.ChunkDelayMs), 0, 50);
+        /// <summary>Onboard profile written black once and selected as "lights off" (Fn+R).</summary>
+        public const byte DarkProfile = 4;
+
+        // Power states, like G-Helper's laptop backlight options (Extra > Laptop Backlight). Default: lit.
+        public static bool Awake { get => AppConfig.Get("clix_awake", 1) != 0; set => AppConfig.Set("clix_awake", value ? 1 : 0); }
+        public static bool AwakeOnBattery { get => AppConfig.Get("clix_awake_bat", AppConfig.Get("clix_awake", 1)) != 0; set => AppConfig.Set("clix_awake_bat", value ? 1 : 0); }
+        public static bool Sleep { get => AppConfig.Get("clix_sleep", 1) != 0; set => AppConfig.Set("clix_sleep", value ? 1 : 0); }
+        public static bool BootShutdown { get => AppConfig.Get("clix_boot", 1) != 0; set => AppConfig.Set("clix_boot", value ? 1 : 0); }
+
         /// <summary>Master switch: "gk6x_keyboard": 0 in config.json disables all Clix support.</summary>
         public static bool Enabled => AppConfig.Get("gk6x_keyboard", 1) != 0;
-    }
-
-    public enum Gk6xAccentMode { SameAsOtherKeys = 0, Off = 1, OwnColour = 2 }
-
-    /// <summary>The Clix as a G-Helper peripheral (tile in the main window).</summary>
-    public sealed class Gk6xPeripheral : IPeripheral
-    {
-        public Gk6xIdentity Identity { get; }
-        public Gk6xSupportedModel Model { get; }
-        public string DevicePath { get; }
-
-        public Gk6xPeripheral(Gk6xIdentity identity, Gk6xSupportedModel model, string devicePath)
-        {
-            Identity = identity;
-            Model = model;
-            DevicePath = devicePath;
-        }
-
-        public bool IsDeviceReady => true;
-        public int Battery => 0;
-        public bool Charging => false;
-        public bool CanExport() => false;
-        public byte[] Export() => Array.Empty<byte>();
-        public bool Import(byte[] blob) => false;
-        public PeripheralType DeviceType() => PeripheralType.Keyboard;
-        public string GetDisplayName() => Model.Name;
-        public bool HasBattery() => false;
-        public void SynchronizeDevice() { }
-        public void ReadBattery() { }
     }
 
     public static class Gk6xKeyboards
     {
         private const string LastWrittenKey = "gk6x_last_written";
-        public const int DebounceMs = 400;
-        public const int MinWriteIntervalMs = 1500;
+        public const int DebounceMs = 120;
+        public const int MinWriteIntervalMs = 0;
 
-        private static readonly object listLock = new();
-        /// <summary>Serialises all USB transactions (detection and sync) so replies can't interleave.</summary>
+        /// <summary>Serialises all USB transactions (detection and writes) so replies can't interleave.</summary>
         private static readonly object ioGate = new();
-        private static readonly List<Gk6xPeripheral> connected = new();
-        private static volatile bool selectOnNextSync;
+        private static readonly object stateLock = new();
+        private static Gk6xClix? current;
+        private static bool toastShown;
         /// <summary>
-        /// Safety net: the first sync after G-Helper starts rewrites the lighting even if the stamp says it is current,
-        /// in case the keyboard lost it (Fn+Esc+Q reset, another app). One small flash write per launch, nothing more.
+        /// Safety net: the first write after G-Helper starts happens even if the stamp says it is current, in case
+        /// the keyboard lost its lighting (Fn+Esc+Q reset, another app). One small flash write per launch.
         /// </summary>
         private static bool verifiedThisSession;
-        private static bool toastShown;
+        private static volatile bool selectOnNextWrite;
+        private static volatile bool asleep;
+        private static volatile bool shuttingDown;
+        /// <summary>Profile selected by the last 0B command this session (0 = unknown).</summary>
+        private static byte lastSelected;
+        private const string DarkWrittenKey = "gk6x_dark_written";
 
-        private static readonly Gk6xCoalescer coalescer = new(SyncOnce, DebounceMs, MinWriteIntervalMs, Fail);
+        private static readonly Gk6xCoalescer coalescer = new(WriteOnce, DebounceMs, MinWriteIntervalMs, Fail);
 
-        /// <summary>Human-readable result of the last operation, for the settings window.</summary>
+        public static bool IsConnected { get { lock (stateLock) return current is not null; } }
+
         public static string Status { get; private set; } = "";
         public static bool LastFailed { get; private set; }
-        public static event Action? StatusChanged;
 
-        public static List<IPeripheral> Connected
-        {
-            get { lock (listLock) return connected.Cast<IPeripheral>().ToList(); }
-        }
+        // ---------------- Hook called from G-Helper (startup and HID device change) ----------------
 
-        // ---------------- Hooks called from G-Helper ----------------
-
-        /// <summary>HID device change / startup: find, identify, add or remove the tile.</summary>
         public static void Detect()
         {
             if (!Gk6xSettings.Enabled) return;
             try
             {
-                var candidates = Gk6xHidTransport.FindCandidates();
-                bool changed = false;
-                lock (listLock)
+                Gk6xClix? old;
+                lock (stateLock) old = current;
+                if (old is not null)
                 {
-                    int removed = connected.RemoveAll(p => !candidates.Any(c => c.DevicePath == p.DevicePath));
-                    changed |= removed > 0;
+                    if (old.IsDeviceConnected()) return;
+                    old.CheckConnection(); // unplugged: let G-Helper drop the old tile before a new one is added
                 }
-                if (candidates.Count == 1 && !IsConnected(candidates[0].DevicePath))
+
+                var candidates = Gk6xHidTransport.FindCandidates();
+                if (candidates.Count > 1) { Logger.WriteLine($"GK6X: {candidates.Count} matching collections found, refusing to guess"); return; }
+                if (candidates.Count == 0) return;
+
+                Gk6xClix? clix;
                 lock (ioGate)
                 {
                     var transport = Gk6xHidTransport.TryOpen(candidates[0]);
-                    if (transport is null) { Fail("could not open the keyboard's lighting interface"); }
-                    else
-                    {
-                        using var kb = new Gk6xKeyboard(transport, Logger.WriteLine);
-                        var id = kb.Identify();
-                        if (kb.Model is not null)
-                        {
-                            lock (listLock) connected.Add(new Gk6xPeripheral(id, kb.Model, candidates[0].DevicePath));
-                            changed = true;
-                            selectOnNextSync = Gk6xSettings.AutoSelectProfile;
-                        }
-                    }
+                    if (transport is null) { Fail("could not open the keyboard's lighting interface"); return; }
+                    using var kb = new Gk6xKeyboard(transport, Logger.WriteLine);
+                    var id = kb.Identify();
+                    if (kb.Model is null) return;
+                    clix = new Gk6xClix(id, kb.Model, candidates[0].DevicePath);
                 }
-                else if (candidates.Count > 1)
+
+                lock (stateLock) current = clix;
+                selectOnNextWrite = Gk6xSettings.AutoSelectProfile;
+                PeripheralsProvider.Connect(clix);
+                bool registered = PeripheralsProvider.ConnectedKeyboards.ToArray().Any(k => ReferenceEquals(k, clix));
+                if (!registered)
                 {
-                    Logger.WriteLine($"GK6X: {candidates.Count} matching collections found, refusing to guess");
+                    Logger.WriteLine("GK6X: G-Helper did not add the keyboard (already listed?)");
+                    lock (stateLock) if (ReferenceEquals(current, clix)) current = null;
+                    clix.Dispose();
+                    return;
                 }
-                if (changed)
-                {
-                    RefreshMainWindow();
-                    RequestSync();
-                }
+                // Connect() re-applies stored per-key lighting itself; for a single colour do it here, so the
+                // once-per-launch check and the Fn+W switch happen in both cases.
+                if (!clix.HasTransientLighting && !PeripheralsProvider.IsKeyboardAuraSync) clix.ApplyStoredLighting();
             }
             catch (Exception e)
             {
@@ -169,111 +118,117 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
             }
         }
 
-        /// <summary>Laptop Aura colour or user brightness changed (Aura.ApplyAura / ApplyBrightness).</summary>
-        public static void OnLaptopLightingChanged()
+        internal static void Disconnected(Gk6xClix clix)
         {
-            if (Gk6xSettings.SyncWithLaptop) RequestSync();
+            lock (stateLock) if (ReferenceEquals(current, clix)) current = null;
+            lastSelected = 0;
         }
 
-        /// <summary>Clix settings changed in its own window.</summary>
-        public static void RequestSync()
+        // ---------------- Power hooks (sleep, wake, shutdown, charger) ----------------
+
+        public static void OnSuspend() { asleep = true; ApplyPowerNow(); }
+        public static void OnResume() { asleep = false; PowerChanged(); }
+        public static void OnShutdown() { shuttingDown = true; ApplyPowerNow(); }
+        /// <summary>Charger plugged/unplugged, or a power option changed in Extra.</summary>
+        public static void PowerChanged()
         {
-            if (!Gk6xSettings.Enabled) return;
-            lock (listLock) if (connected.Count == 0) return;
+            lock (stateLock) if (current is null) return;
             coalescer.Request();
         }
 
-        /// <summary>"Apply now": rewrite the lighting (e.g. after Fn+Esc+Q cleared the keyboard) and switch to Fn+W.</summary>
-        public static void RequestSelectProfile()
+        /// <summary>Lit, unless asleep / shutting down / on battery with the matching option unticked.</summary>
+        public static bool ShouldBeLit()
         {
-            selectOnNextSync = true;
-            AppConfig.Set(LastWrittenKey, "");
-            lock (listLock) if (connected.Count == 0) return;
-            coalescer.Request();
+            if (shuttingDown) return Gk6xSettings.BootShutdown;
+            if (asleep) return Gk6xSettings.Sleep;
+            bool onBattery = System.Windows.Forms.SystemInformation.PowerStatus.PowerLineStatus == System.Windows.Forms.PowerLineStatus.Offline;
+            return onBattery ? Gk6xSettings.AwakeOnBattery : Gk6xSettings.Awake;
         }
+
+        /// <summary>Suspend and shutdown can't wait for the debounce: switch profile synchronously (a few ms).</summary>
+        private static void ApplyPowerNow()
+        {
+            try { WriteOnce(); } catch (Exception e) { Logger.WriteLine("GK6X: power change failed: " + e.Message); }
+        }
+
+        /// <summary>The adapter's LED state changed: write it (coalesced).</summary>
+        internal static void RequestWrite() => coalescer.Request();
 
         // ---------------- Work (background task) ----------------
 
-        /// <summary>Main colour, and the red-keycap colour (null = same as the main colour).</summary>
-        public static ((byte r, byte g, byte b) main, (byte r, byte g, byte b)? accent) DesiredColours()
+        private static bool WriteOnce()
         {
-            Color c;
-            int percent;
-            if (Gk6xSettings.SyncWithLaptop)
-            {
-                c = Color.FromArgb(AppConfig.Get("aura_color"));
-                int level = InputDispatcher.GetBacklight(); // 0..3, power-source aware
-                percent = level <= 0 ? 0 : level * 100 / 3;
-            }
-            else
-            {
-                c = Gk6xSettings.Colour;
-                percent = Gk6xSettings.LightsOn ? Gk6xSettings.Brightness : 0;
-            }
-            var main = Gk6xProtocol.Scale(c.R, c.G, c.B, percent);
-            (byte, byte, byte)? accent = Gk6xSettings.AccentMode switch
-            {
-                Gk6xAccentMode.Off => ((byte)0, (byte)0, (byte)0),
-                Gk6xAccentMode.OwnColour => Gk6xProtocol.Scale(Gk6xSettings.AccentColour.R, Gk6xSettings.AccentColour.G, Gk6xSettings.AccentColour.B, percent),
-                _ => null,
-            };
-            return (main, accent);
-        }
-
-        /// <summary>Returns true only if a lighting write was made.</summary>
-        private static bool SyncOnce()
-        {
-            Gk6xPeripheral? target;
-            lock (listLock) target = connected.FirstOrDefault();
+            Gk6xClix? target;
+            lock (stateLock) target = current;
             if (target is null) return false;
-            lock (ioGate) return SyncLocked(target);
+            lock (ioGate) return WriteLocked(target);
         }
 
-        private static bool SyncLocked(Gk6xPeripheral target)
+        private static bool WriteLocked(Gk6xClix target)
         {
+            uint[] slots = target.SnapshotSlots();
+            byte profile = Gk6xKeyboard.GHelperProfile;
+            var id = target.Identity;
+            string stamp = $"{id.ModelId}:{id.FirmwareId:X8}:p{profile}:" + Hash(slots);
+            bool write = !verifiedThisSession || AppConfig.GetString(LastWrittenKey) != stamp;
+            bool lit = ShouldBeLit();
+            byte targetProfile = lit ? profile : Gk6xSettings.DarkProfile;
+            string darkStamp = $"{id.ModelId}:{id.FirmwareId:X8}:p{Gk6xSettings.DarkProfile}:black";
+            bool writeDark = !lit && AppConfig.GetString(DarkWrittenKey) != darkStamp;
+            // While lit, the profile is only re-selected when auto-select is on (or "off" was active before).
+            bool select = !lit ? lastSelected != targetProfile
+                        : selectOnNextWrite || lastSelected == Gk6xSettings.DarkProfile || write && Gk6xSettings.AutoSelectProfile;
+            if (!write && !select && !writeDark) { SetStatus("Up to date", false); return false; }
+
             var transport = Gk6xHidTransport.TryOpenPath(target.DevicePath);
             if (transport is null) { Fail("keyboard not reachable (unplugged?)"); return false; }
 
             using var kb = new Gk6xKeyboard(transport, Logger.WriteLine);
-            Gk6xIdentity id = kb.Identify();
-            if (!kb.IsSupported) { Fail("keyboard identity changed; writes disabled"); return false; }
+            // Identified on connect (same device path); the info queries are not repeated for every write.
+            kb.AssumeIdentity(id, target.Model);
+            long t0 = Environment.TickCount64;
 
-            var (main, accent) = DesiredColours();
-            var (r, g, b) = main;
-            byte profile = Gk6xKeyboard.GHelperProfile;
-            string keys = accent is { } a ? $"{a.r},{a.g},{a.b}" : "same";
-            string stamp = $"{id.ModelId}:{id.FirmwareId:X8}:p{profile}:{r},{g},{b}:keys={keys}";
-            bool wrote = false;
-
-            if (!verifiedThisSession || AppConfig.GetString(LastWrittenKey) != stamp)
+            if (write)
             {
                 // Forget the old stamp first: if this write fails part-way the next request must rewrite.
                 AppConfig.Set(LastWrittenKey, "");
-                kb.SetStaticColours(profile, main, accent);
+                kb.SetLighting(profile, slots, !Gk6xSettings.SkipClear, Gk6xSettings.ChunkDelayMs);
                 AppConfig.Set(LastWrittenKey, stamp);
                 verifiedThisSession = true;
-                wrote = true;
-                Logger.WriteLine($"GK6X: profile {profile} colour {r},{g},{b}, red keys {keys} written");
             }
 
-            // Selecting the profile again after a write is what makes the keyboard reload it (the vendor app and
-            // GK6X both do this). Without it a write made while Fn+W is active only shows after leaving and re-entering.
-            if (selectOnNextSync || wrote && Gk6xSettings.AutoSelectProfile)
+            if (writeDark)
             {
-                selectOnNextSync = false;
-                kb.SelectProfile(profile);
+                // One time only: make the Fn+R profile dark so "off" is just a profile switch.
+                AppConfig.Set(DarkWrittenKey, "");
+                kb.SetLighting(Gk6xSettings.DarkProfile, new uint[Gk6xProtocol.StaticSlots], true, Gk6xSettings.ChunkDelayMs);
+                AppConfig.Set(DarkWrittenKey, darkStamp);
+                Logger.WriteLine($"GK6X: profile {Gk6xSettings.DarkProfile} set to black (lights-off state)");
             }
 
-            SetStatus(wrote ? "Applied" : "Up to date", false);
-            return wrote;
+            // Selecting the profile after a write is what makes the keyboard reload it (the vendor app and GK6X
+            // both do this). Without it a write made while Fn+W is active only shows after re-entering Fn+W.
+            if (select)
+            {
+                if (lit) selectOnNextWrite = false;
+                kb.SelectProfile(targetProfile);
+                lastSelected = targetProfile;
+            }
+
+            Logger.WriteLine($"GK6X: profile {profile} {(write ? "written" : "unchanged")}{(select ? $", profile {targetProfile} selected" : "")} in {Environment.TickCount64 - t0} ms");
+            SetStatus(write ? "Applied" : "Up to date", false);
+            return write;
         }
 
-        // ---------------- Status / UI ----------------
-
-        private static bool IsConnected(string path)
+        private static string Hash(uint[] slots)
         {
-            lock (listLock) return connected.Any(p => p.DevicePath == path);
+            // FNV-1a over the slot values: short, stable, and changes whenever any LED changes.
+            ulong h = 14695981039346656037UL;
+            foreach (uint v in slots) { h ^= v; h *= 1099511628211UL; }
+            return h.ToString("X16");
         }
+
+        // ---------------- Status ----------------
 
         private static void Fail(string message)
         {
@@ -288,18 +243,6 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
         {
             Status = s;
             LastFailed = failed;
-            try { StatusChanged?.Invoke(); } catch { }
-        }
-
-        private static void RefreshMainWindow()
-        {
-            try
-            {
-                var f = Program.settingsForm;
-                if (f is null || f.IsDisposed || !f.IsHandleCreated) return;
-                f.BeginInvoke(delegate { f.VisualizePeripherals(); });
-            }
-            catch { }
         }
     }
 }

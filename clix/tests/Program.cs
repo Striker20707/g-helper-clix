@@ -267,8 +267,7 @@ static class Program
             kb.Identify();
             int before = fk.Writes.Count;
             T.Throws<Gk6xException>(() => kb.SetStaticColour(1, 255, 0, 0), "main profile (1, holds the Fn+\\ effects) is refused");
-            T.Throws<Gk6xException>(() => kb.SetStaticColour(3, 255, 0, 0), "Fn+E profile (3) is refused");
-            T.Throws<Gk6xException>(() => kb.SetStaticColour(4, 255, 0, 0), "Fn+R profile (4) is refused");
+            T.Check(Gk6xKeyboard.WritableLightingProfiles.SequenceEqual(new byte[] { 2, 3, 4 }), "writable: Fn+W (2) plus Fn+E/Fn+R (3/4) for the dark off-slot");
             T.Check(fk.Writes.Count == before, "refused profiles: nothing sent");
             T.Throws<Gk6xException>(() => kb.SelectProfile(0), "profile 0 out of range");
             T.Throws<Gk6xException>(() => kb.SelectProfile(5), "profile 5 (driver/online mode) refused");
@@ -360,6 +359,42 @@ static class Program
             var bad = new Gk6xCoalescer(() => throw new IOException("unplugged"), 10, 0, _ => errs++);
             bad.Request()!.Wait(2000);
             T.Check(errs == 1, "exceptions logged once, worker exits (no retry loop)");
+        }
+
+        // ---- Per-slot write, optional clear, chunk pause ----
+        {
+            Gk6xKeyboard.SupportedModels.Clear();
+            Gk6xKeyboard.SupportedModels.Add(ShippedModel);
+            var fk = new FakeKeyboard { ModelId = 655491246, FirmwareId = 0x90206111 };
+            var sleeps = new List<int>();
+            var kb = new Gk6xKeyboard(fk, null, ms => sleeps.Add(ms));
+            kb.Identify();
+            int before = fk.Writes.Count;
+            var slots = new uint[Gk6xProtocol.StaticSlots];
+            slots[24] = Gk6xProtocol.EncodeColour(1, 2, 3);
+            kb.SetLighting(2, slots, clearFirst: false, chunkDelayMs: 0);
+            var ops = fk.Writes.Skip(before).Select(w => w[1]).ToList();
+            T.Check(ops.Count == 22 && ops.All(o => o == 0x27), "clearFirst:false sends only the 22 lighting chunks (no 21)");
+            T.Check(sleeps.Count == 0, "chunkDelayMs:0 never sleeps");
+            T.Check(fk.Writes.Skip(before).Select(w => w.Skip(9).Take(56).ToArray()).SelectMany(x => x).Take(1219).SequenceEqual(Gk6xProtocol.BuildStaticLightingPayload(slots)), "per-slot payload sent in order");
+            T.Throws<Gk6xException>(() => kb.SetLighting(2, new uint[10]), "wrong slot count refused");
+            T.Throws<Gk6xException>(() => kb.SetLighting(1, slots), "profile 1 (Fn+] / Fn+\\ effects) still refused");
+
+            // dark off-slot: profile 4 written black, then selected
+            before = fk.Writes.Count;
+            kb.SetLighting(4, new uint[Gk6xProtocol.StaticSlots]);
+            kb.SelectProfile(4);
+            T.Check(fk.Writes[before][1] == 0x21 && fk.Writes[before][2] == 4 && fk.Writes.Last()[1] == 0x0B && fk.Writes.Last()[2] == 4, "Fn+R profile can be blacked out and selected");
+
+            // identity reuse: a second connection to the same keyboard skips the info queries
+            var fk2 = new FakeKeyboard { ModelId = 655491246, FirmwareId = 0x90206111 };
+            var kb2 = new Gk6xKeyboard(fk2, null, _ => { });
+            kb2.AssumeIdentity(kb.Identity!, ShippedModel);
+            kb2.SetLighting(2, slots);
+            T.Check(fk2.Writes.All(w => w[1] != 0x01), "AssumeIdentity: no 01 info queries before the write");
+            var kb3 = new Gk6xKeyboard(new FakeKeyboard(), null, _ => { });
+            kb3.AssumeIdentity(kb.Identity!, new Gk6xSupportedModel(1, 2, "not allowlisted"));
+            T.Throws<Gk6xException>(() => kb3.SetLighting(2, slots), "AssumeIdentity with a model outside the allowlist refuses writes");
         }
 
         // ---- Shipped allowlist entry carries the red-keycap LED list (static init order) ----
