@@ -1,6 +1,7 @@
 // Extras for the Matrix Clix in G-Helper's shared keyboard window:
-//   * clearer names: "Single colour" / "Per key" instead of Static / Custom; no animation speed (the Clix
-//     modes here are all solid), and in its place "Turn off when the display turns off"
+//   * clearer names: "Single colour" / "Per key" instead of Static / Custom, "Colour cycle", "Rainbow wave"
+//   * Animation Speed only for the animated modes (and not while synced: the laptop's speed is used), and
+//     below it "Turn off when the display turns off"
 //   * with "Sync with laptop" on: the colour swatch shows the laptop's colour, the paint row is hidden,
 //     and the disabled mode box is greyed out so it doesn't look clickable
 // In Per key mode:
@@ -42,17 +43,27 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
         public const string SingleColourName = "Single colour";
         public const string PerKeyName = "Per key";
 
+        private static readonly Dictionary<KeyboardLightingMode, string> ModeNames = new()
+        {
+            [KeyboardLightingMode.Static] = SingleColourName,
+            [KeyboardLightingMode.Breathing] = "Breathing",
+            [KeyboardLightingMode.ColorCycle] = "Colour cycle",
+            [KeyboardLightingMode.Wave] = "Rainbow wave",
+            [KeyboardLightingMode.Direct] = PerKeyName,
+        };
+
         public static void Extend(AsusKeyboardSettings form)
         {
             form.ClixHidePaintWhenSynced = true;
             var state = new FormState();
+            form.ClixLayoutRows = gap => LayoutRows(form, state, gap);
             form.ClixVisualized += () => { try { Fixup(form, state); } catch { } };
             Action laptop = () => { try { if (form.IsHandleCreated) form.BeginInvoke(() => Fixup(form, state)); } catch { } };
             Gk6xKeyboards.LaptopAuraApplied += laptop;
             form.FormClosed += (_, _) => Gk6xKeyboards.LaptopAuraApplied -= laptop;
             form.Shown += (_, _) =>
             {
-                try { RenameModes(form); AddDisplayOption(form, state); Fixup(form, state); Attach(form); }
+                try { RenameModes(form); AddDisplayOption(form, state); form.ClixRelayout(); Fixup(form, state); Attach(form); }
                 catch (Exception e) { Logger.WriteLine("GK6X: window extras not added: " + e.Message); }
             };
         }
@@ -69,10 +80,7 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
             ComboBox combo = form.ClixModeCombo;
             var modes = form.ClixKeyboard.SupportedLightingModes();
             for (int i = 0; i < combo.Items.Count && i < modes.Length; i++)
-            {
-                if (modes[i] == KeyboardLightingMode.Static) combo.Items[i] = SingleColourName;
-                else if (modes[i] == KeyboardLightingMode.Direct) combo.Items[i] = PerKeyName;
-            }
+                if (ModeNames.TryGetValue(modes[i], out string? name)) combo.Items[i] = name;
         }
 
         private static void AddDisplayOption(AsusKeyboardSettings form, FormState state)
@@ -96,18 +104,26 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
             state.DisplayOff = box;
         }
 
+        /// <summary>
+        /// Called from the window's LayoutSections: lays out the rows under "Sync with laptop" and returns the
+        /// bottom of the last one. Speed row only for an animated mode set here; then the display option.
+        /// </summary>
+        private static int LayoutRows(AsusKeyboardSettings form, FormState state, int gap)
+        {
+            Control label = form.ClixSpeedLabel, speed = form.ClixSpeedCombo;
+            bool animated = Gk6xClix.IsAnimated(form.ClixSelectedMode) && !form.ClixSyncCheck.Checked;
+            label.Visible = speed.Visible = animated;
+            if (state.DisplayOff is not { } box) return animated ? speed.Bottom : label.Top - gap;
+
+            int rowTop = animated ? speed.Bottom + gap : label.Top;
+            box.Left = form.ClixSyncCheck.Left;
+            box.Top = rowTop + (speed.Height - box.Height) / 2;
+            box.Visible = true;
+            return rowTop + speed.Height;
+        }
+
         private static void Fixup(AsusKeyboardSettings form, FormState state)
         {
-            // No animation speed: the row is used for the display option instead.
-            Control label = form.ClixSpeedLabel, speed = form.ClixSpeedCombo;
-            label.Visible = speed.Visible = false;
-            if (state.DisplayOff is { } box)
-            {
-                box.Left = form.ClixSyncCheck.Left;
-                box.Top = label.Top + (speed.Bottom - label.Top - box.Height) / 2;
-                box.Visible = true;
-            }
-
             bool synced = form.ClixSyncCheck.Checked;
             ComboBox mode = form.ClixModeCombo;
             state.ModeForeColor ??= mode.ForeColor;
