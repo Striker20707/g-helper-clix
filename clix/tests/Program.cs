@@ -215,8 +215,11 @@ static class Program
         T.Check(Gk6xProtocol.Scale(200, 100, 50, 150) == (200, 100, 50), "clamped at 100%");
 
         // ---- Forbidden opcodes can't be built ----
-        foreach (byte op in new byte[] { 0x03, 0x04, 0x0C, 0x15, 0x16, 0x17, 0x1A, 0x25, 0x26, 0x31, 0xFF })
+        foreach (byte op in new byte[] { 0x03, 0x04, 0x15, 0x25, 0x26, 0x31, 0xFF })
             T.Throws<InvalidOperationException>(() => Gk6xProtocol.BuildReport(op, 0), $"opcode 0x{op:X2} refused");
+        // live mode (hardware-tested 2026-11-10): ping, driver key table, driver lighting config, frames
+        T.Check(new byte[] { 0x0C, 0x16, 0x17, 0x1A }.All(op => Gk6xProtocol.AllowedOpcodes.Contains(op)) && Gk6xProtocol.AllowedOpcodes.Length == 9,
+                "allowlist = 5 stored-lighting opcodes + 4 live opcodes, nothing else");
 
         // ---- Identify, unknown model: no lighting writes ----
         Allow(false);
@@ -460,6 +463,118 @@ static class Program
             kb.Identify();
             kb.SetStaticColours(2, (10, 20, 30), null);
             T.Check(Captured(fk).SequenceEqual(Gk6xProtocol.BuildStaticLightingPayload(10, 20, 30)), "no accent = identical to the single-colour payload");
+        }
+
+        // ---- Live lighting (driver mode), as tested on the Matrix Clix 2026-11-10 ----
+        {
+            Gk6xKeyboard.SupportedModels.Clear();
+            Gk6xKeyboard.SupportedModels.Add(ShippedModel);
+            var fk = new FakeKeyboard { ModelId = 655491246, FirmwareId = 0x90206111, BufA = 15, BufB = 8 };
+            var kb = new Gk6xKeyboard(fk, null, _ => { });
+            kb.Identify();
+            int before = fk.Writes.Count;
+            kb.EnterLiveMode();
+            var lw = fk.Writes.Skip(before).ToList();
+            T.Check(lw.Count == 12, $"live entry: ping, 0B 05, 9 x 16 01, 17 01 (got {lw.Count})");
+            T.Check(lw[0][1] == 0x0C && lw[1][1] == 0x0B && lw[1][2] == 5, "starts with 0C ping, then 0B 05");
+            T.Check(lw.Skip(2).Take(9).All(w => w[1] == 0x16 && w[2] == 1), "9 x 16 01");
+            T.Check(lw.Skip(2).Take(9).Select(w => (int)w[6]).SequenceEqual(Enumerable.Repeat(56, 8).Append(32)), "16 chunk length at byte 5 (56 x 8, then 32)");
+            T.Check(lw.Skip(2).Take(9).All(w => w[5] == 0), "byte 4 stays 0 for 16");
+            T.Check(lw.Skip(2).Take(9).SelectMany(w => w.Skip(9).Take(w[6])).SequenceEqual(Gk6xProtocol.BuildKeyPayload(Gk6xKeyTables.MatrixClixNormalKeys)), "16 chunks carry the normal key table");
+            T.Check(lw[11][1] == 0x17 && lw[11][2] == 1 && lw[11].Skip(9).Take(9).SequenceEqual(new byte[] { 240, 1, 18, 3, 0, 0, 0, 0, 15 }) && lw[11].Skip(3).Take(4).All(b => b == 0),
+                    "17 01 with the vendor config 240 1 18 3 0 0 0 0 15");
+
+            uint[] slots = new uint[Gk6xProtocol.StaticSlots];
+            slots[0] = Gk6xProtocol.EncodeColour(10, 20, 30);
+            slots[131] = Gk6xProtocol.EncodeColour(1, 2, 3);
+            slots[140] = Gk6xProtocol.EncodeColour(9, 9, 9);
+            before = fk.Writes.Count;
+            kb.SendLiveFrame(slots);
+            var fw = fk.Writes.Skip(before).ToList();
+            T.Check(fw.Count == 11 && fw.Take(10).All(w => w[1] == 0x1A && w[2] == 1) && fw[10][1] == 0x1A && fw[10][2] == 2, "frame: 10 x 1A 01, then 1A 02");
+            T.Check(fw.Take(10).Select(w => w[3] | (w[4] << 8)).SequenceEqual(Enumerable.Range(0, 10).Select(i => i * 56)), "1A chunk offsets 0 .. 504");
+            T.Check(fw.Take(10).Select(w => (int)w[6]).SequenceEqual(Enumerable.Repeat(56, 9).Append(24)), "1A chunk length at byte 5 (56 x 9, then 24)");
+            byte[] data = fw.Take(10).SelectMany(w => w.Skip(9).Take(w[6])).ToArray();
+            T.Check(data.Length == 528 && data.Take(4).SequenceEqual(new byte[] { 10, 20, 30, 100 }) && data.Skip(524).SequenceEqual(new byte[] { 1, 2, 3, 100 }),
+                    "frame = 132 x R,G,B,100 by LocationCode");
+            T.Check(data.Skip(4).Take(4).SequenceEqual(new byte[] { 0, 0, 0, 100 }), "unlit slot = 0,0,0,100");
+            T.Check(Gk6xProtocol.BuildLiveFrame(slots).SequenceEqual(data), "BuildLiveFrame matches what was sent (slots past 131 ignored)");
+            before = fk.Writes.Count;
+            kb.Ping();
+            T.Check(fk.Writes.Count == before + 1 && fk.Writes.Last()[1] == 0x0C, "Ping = one 0C");
+            T.Check(fk.Writes.All(w => Gk6xProtocol.AllowedOpcodes.Contains(w[1])) && fk.IncomingCrcErrors == 0, "live: allowlisted opcodes only, CRC ok");
+            T.Check(!fk.Writes.Any(w => w[1] == 0x21 || w[1] == 0x27 || w[1] == 0x22), "live mode stores nothing (no 21/27/22)");
+
+            // typing between frames: a few dozen unsolicited reports are skipped
+            var fkType = new FakeKeyboard { ModelId = 655491246, FirmwareId = 0x90206111, BufA = 15, BufB = 8 };
+            var kbType = new Gk6xKeyboard(fkType, null, _ => { });
+            kbType.Identify();
+            fkType.UnsolicitedBeforeEachReply = 40;
+            kbType.SendLiveFrame(slots);
+            T.Check(fkType.Writes.Count(w => w[1] == 0x1A) == 11, "frame goes through with 40 key reports queued before each reply");
+
+            // refusals stop at once
+            var fkNo = new FakeKeyboard { ModelId = 655491246, FirmwareId = 0x90206111, BufA = 15, BufB = 8 };
+            var kbNo = new Gk6xKeyboard(fkNo, null, _ => { });
+            kbNo.Identify();
+            fkNo.Fault = Fault.WrongProfileEcho; fkNo.FaultOnOp = 0x0B;
+            T.Throws<Gk6xException>(() => kbNo.EnterLiveMode(), "driver mode not echoed -> refused");
+            T.Check(!fkNo.Writes.Any(w => w[1] == 0x16 || w[1] == 0x17), "no key table or config after a refused 0B 05");
+            fkNo.Fault = Fault.Refuse; fkNo.FaultOnOp = 0x1A;
+            T.Throws<Gk6xException>(() => kbNo.SendLiveFrame(slots), "refused frame chunk -> exception");
+            T.Check(fkNo.Writes.Count(w => w[1] == 0x1A) == 1, "stops after the first refused frame chunk");
+            var kbOther = new Gk6xKeyboard(new FakeKeyboard { BufA = 15, BufB = 8 }, null, _ => { });
+            kbOther.Identify();
+            T.Throws<Gk6xException>(() => kbOther.EnterLiveMode(), "unknown model: live mode refused");
+            var kbSmall = new Gk6xKeyboard(new FakeKeyboard { ModelId = 655491246, FirmwareId = 0x90206111 }, null, _ => { });
+            kbSmall.Identify();
+            T.Throws<Gk6xException>(() => kbSmall.EnterLiveMode(), "other key buffer sizes: live mode refused");
+        }
+
+        // ---- Live effects ----
+        {
+            uint[] f = new uint[Gk6xProtocol.StaticSlots];
+            uint C(byte r, byte g, byte b) => Gk6xProtocol.EncodeColour(r, g, b);
+            var solid = Enumerable.Range(0, f.Length).Select(i => (uint)i).ToArray();
+            Gk6xEffects.Render(Gk6xEffect.Solid(solid), 5, f);
+            T.Check(f.SequenceEqual(solid), "solid: slots as given");
+
+            var br = new Gk6xEffect(Gk6xEffectKind.Breathing, solid, (200, 100, 0), (0, 0, 0), 1, 100);
+            double P = Gk6xEffects.Period(Gk6xEffectKind.Breathing, 1);
+            Gk6xEffects.Render(br, 0, f);
+            T.Check(f.All(v => v == 0), "breathing starts at colour 2 (black)");
+            Gk6xEffects.Render(br, P / 2, f);
+            T.Check(f.All(v => v == C(200, 100, 0)), "breathing peaks at colour 1");
+            Gk6xEffects.Render(br with { Brightness = 50 }, P / 2, f);
+            T.Check(f.All(v => v == C(100, 50, 0)), "brightness scales the effect");
+            T.Check(Gk6xEffects.Period(Gk6xEffectKind.Breathing, 0) > P && Gk6xEffects.Period(Gk6xEffectKind.Breathing, 2) < P, "slow is slower, fast is faster");
+
+            var cc = new Gk6xEffect(Gk6xEffectKind.ColorCycle, solid, (0, 0, 0), (0, 0, 0), 1, 100);
+            Gk6xEffects.Render(cc, 0, f);
+            T.Check(f.All(v => v == C(255, 0, 0)), "colour cycle starts red, all keys alike");
+            Gk6xEffects.Render(cc, Gk6xEffects.Period(Gk6xEffectKind.ColorCycle, 1) / 3, f);
+            T.Check(f.All(v => v == C(0, 255, 0)), "a third of the way: green");
+
+            var wave = new Gk6xEffect(Gk6xEffectKind.Wave, solid, (0, 0, 0), (0, 0, 0), 1, 100);
+            Gk6xEffects.Render(wave, 0, f);
+            T.Check(f[0] != f[14] && f[0] != f[24], "rainbow wave: colour changes across the board");
+            uint[] f2 = new uint[f.Length];
+            Gk6xEffects.Render(wave, 0.5, f2);
+            T.Check(f2[0] != f[0], "rainbow wave moves");
+            T.Check(f.All(v => v != 0), "rainbow: every slot lit");
+
+            var strobe = new Gk6xEffect(Gk6xEffectKind.Strobe, solid, (255, 255, 255), (0, 0, 0), 1, 100);
+            double sp = Gk6xEffects.Period(Gk6xEffectKind.Strobe, 1);
+            Gk6xEffects.Render(strobe, 0.1 * sp, f);
+            T.Check(f.All(v => v == C(255, 255, 255)), "strobe on");
+            Gk6xEffects.Render(strobe, 0.75 * sp, f);
+            T.Check(f.All(v => v == 0), "strobe off");
+
+            var star = new Gk6xEffect(Gk6xEffectKind.Star, solid, (255, 255, 255), (0, 0, 40), 1, 100);
+            Gk6xEffects.Render(star, 0.3, f);
+            T.Check(f.Distinct().Count() > 2, "star: keys twinkle at different moments");
+            T.Check(f.Count(v => v == C(0, 0, 40)) > f.Length / 2, "star: most keys show the background colour");
+            T.Check(!new Gk6xEffect(Gk6xEffectKind.Solid, solid, (0, 0, 0), (0, 0, 0), 1, 100).Animated && br.Animated, "only non-solid effects animate");
         }
 
         // ---- Shipped allowlist: exactly the probed Matrix Clix, nothing else ----

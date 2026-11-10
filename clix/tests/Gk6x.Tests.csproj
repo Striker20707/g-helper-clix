@@ -13,6 +13,8 @@
     <Compile Include="../src/Gk6x/Gk6xKeyboard.cs" />
     <Compile Include="../src/Gk6x/Gk6xCoalescer.cs" />
     <Compile Include="../src/Gk6x/Gk6xKeyTables.cs" />
+    <Compile Include="../src/Gk6x/Gk6xEffects.cs" />
+    <Compile Include="../src/Gk6x/Gk6xLayout.cs" />
 
   </ItemGroup>
 </Project>
