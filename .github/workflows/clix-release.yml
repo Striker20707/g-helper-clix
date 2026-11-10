@@ -72,7 +72,7 @@ jobs:
 
       - name: Setup Python
         if: steps.up.outputs.build == 'True'
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.12'
 
@@ -115,19 +115,45 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = "${{ steps.up.outputs.tag }}"
+          $repo = "${{ github.repository }}"
+          # Clix part of the notes: the newest "## Clix build N" section of clix/CHANGELOG.md.
+          $log = Get-Content fork/clix/CHANGELOG.md -Raw
+          $m = [regex]::Match($log, '(?ms)^## (Clix build \d+)\s*\n(.*?)(?=^## |\z)')
+          if (-not $m.Success) { throw "clix/CHANGELOG.md has no '## Clix build N' section" }
+          $build = $m.Groups[1].Value
+          $clixNotes = $m.Groups[2].Value.Trim()
+          $short = "${{ github.sha }}".Substring(0, 7)
+          $upstream = gh api "repos/seerge/g-helper/releases/tags/$tag" --jq .body
+          if ($LASTEXITCODE -ne 0 -or -not $upstream) { $upstream = "(not available, see the link above)" }
+          $global:LASTEXITCODE = 0
           $notes = @"
-          Official G-Helper $tag (https://github.com/seerge/g-helper/releases/tag/$tag) plus the Matrix Clix static-lighting patch from clix/.
+          G-Helper $tag with the Matrix Clix patch ($build, $short).
 
-          - Upstream source: seerge/g-helper @ $tag
-          - Patch source: ${{ github.repository }} @ ${{ github.sha }}
+          ## What's new in $build
+          $clixNotes
+
+          Full Clix history: https://github.com/$repo/blob/${{ github.sha }}/clix/CHANGELOG.md
+
+          ## Build
+          - Upstream source: seerge/g-helper @ $tag (https://github.com/seerge/g-helper/releases/tag/$tag)
+          - Patch source: $repo @ ${{ github.sha }}
           - GHelper.exe SHA-256: ${{ steps.pkg.outputs.sha }}
           - Unsigned build (official releases are signed by seerge; this one is not).
+
+          ## Official G-Helper $tag notes
+          $upstream
           "@
-          gh release view $tag --repo "${{ github.repository }}" *> $null
+          $title = "G-Helper Clix $tag ($build)"
+          $notesFile = Join-Path $env:RUNNER_TEMP "notes.md"
+          Set-Content -Path $notesFile -Value $notes -Encoding utf8
+          gh release view $tag --repo $repo *> $null
           if ($LASTEXITCODE -eq 0) {
             $global:LASTEXITCODE = 0
-            gh release upload $tag out/GHelper.exe out/GHelper.zip --clobber --repo "${{ github.repository }}"
+            gh release upload $tag out/GHelper.exe out/GHelper.zip --clobber --repo $repo
+            if ($LASTEXITCODE -ne 0) { throw "upload failed" }
+            gh release edit $tag --repo $repo --title $title --notes-file $notesFile
           } else {
             $global:LASTEXITCODE = 0
-            gh release create $tag out/GHelper.exe out/GHelper.zip --repo "${{ github.repository }}" --target "${{ github.sha }}" --title "G-Helper $tag + Matrix Clix" --notes $notes
+            gh release create $tag out/GHelper.exe out/GHelper.zip --repo $repo --target "${{ github.sha }}" --title $title --notes-file $notesFile
           }
+          if ($LASTEXITCODE -ne 0) { throw "publishing the release failed" }

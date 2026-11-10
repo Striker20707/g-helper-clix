@@ -52,12 +52,13 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
 
         /// <summary>
         /// Onboard profiles: 1 = main (blue breathing, Fn+] and Fn+\ effects), 2 = Fn+W, 3 = Fn+E, 4 = Fn+R.
-        /// G-Helper writes its lighting to profile 2, which was empty (dark) on the tested keyboard. Profile 3 or 4
-        /// can be written once with black and used as the "lights off" state (switching to it is instant and
-        /// needs no flash write). Profile 1 is never writable: that would erase the Fn+\ effect list.
+        /// Profiles 2-4 are also key layers (vendor data profile_offline_1-3.json): Fn+W = arrow lock
+        /// (/ RAlt Menu RCtrl become arrows), Fn+E = F-key lock, Fn+R = command lock (U I O J K L M , .).
+        /// G-Helper only ever writes lighting to profile 2. Profile 1 is never writable: that would erase the
+        /// Fn+\ effect list. 3 and 4 are refused so a bug can't send the keyboard into a layer that changes keys.
         /// </summary>
         public const byte GHelperProfile = 2;
-        public static readonly byte[] WritableLightingProfiles = { GHelperProfile, 3, 4 };
+        public static readonly byte[] WritableLightingProfiles = { GHelperProfile };
 
         public const int ReplyTimeoutMs = 500;
         /// <summary>Unsolicited reports (e.g. Fn notifications) tolerated while waiting for one reply.</summary>

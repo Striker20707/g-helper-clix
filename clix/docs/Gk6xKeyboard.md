@@ -24,27 +24,41 @@ Colours apply when you let go of the colour picker or click a key.
 | Sleep | `clix_sleep` (1) | Lights off at sleep and display off, back on at wake |
 | Boot/Shutdown | `clix_boot` (1) | Lights off at shutdown, so the keyboard starts dark until G-Helper runs |
 
-"Off" is the Fn+R profile (4), written black once (`gk6x_dark_written`). Turning off or on is then just a
-profile switch (`0B 04` / `0B 02`): instant, with no flash write.
+"Off" is black written into Fn+W, and "on" writes the colours back. Each is one write of about 1.2 s
+(stored in the keyboard's flash), so the defaults keep the lights on and nothing is written unless you
+untick an option.
 
-Other config keys: `clix_autoselect` (1, switch to the G-Helper profile on connect), `clix_double_buffer` (1, alternate Fn+W / Fn+E so the keyboard's wipe-before-write is never visible),
+Other config keys: `clix_autoselect` (1, switch to Fn+W on connect and after each write),
 `clix_chunk_delay` (10 ms). `"gk6x_keyboard": 0` turns all Clix support off.
 
 ## Where the lighting lives
 
 The keyboard has four onboard profiles: 1 = main (Fn+] blue breathing and the Fn+\ reactive effects),
-2 = Fn+W, 3 = Fn+E, 4 = Fn+R. G-Helper writes its lighting to profile 2 and, once, black to profile 4 (the off state). Profile 1
-cannot be written: its lighting is a fixed firmware bank. Hardware test 2026-11-10: `21 01 03` and
-`24 01` were refused with status F0. Profile 1 is refused in code.
+2 = Fn+W, 3 = Fn+E, 4 = Fn+R. Profiles 2-4 are also **key layers**, per the Matrix manual and the vendor
+driver's own data (`device/655491246/data/profile_offline_1-3.json` in Matrix Driver 6.0.0.11):
+
+| Layer | Keys it changes | Everything else |
+|---|---|---|
+| Fn+W | `/` Up, Right Alt Left, Menu Down, Right Ctrl Right | normal |
+| Fn+E | `1`..`=` become F1-F12 | normal |
+| Fn+R | U PrtSc, I ScrLk, O Pause, J Ins, K Home, L PgUp, M Del, `,` End, `.` PgDn | normal |
+
+Fn+Q, or the same combo again, goes back to profile 1. G-Helper only writes profile 2 (Fn+W) and refuses
+3 and 4 in code. Profile 1 cannot be written: its lighting is a fixed firmware bank (hardware test
+2026-11-10: `21 01 03` and `24 01` refused with F0), and it is refused in code too.
+
+The vendor driver writes these same per-layer lighting tables (it calls them "ModeLE") and switches
+layers with the same select command, so G-Helper is doing what the official app does, in C#.
 
 The keyboard stores the colour and the selected profile itself. Both survive unplugging and rebooting
 (confirmed by the owner 2026-11-10). G-Helper holds no handle and runs no thread between writes, and
 it does no polling.
 
-Writes are coalesced (400 ms debounce, at least 1.5 s apart). A write is skipped when the stamp in
-`gk6x_last_written` (model, firmware, profile, colours) matches. A failed write clears the stamp. The
-first sync after each G-Helper launch rewrites once anyway, in case the keyboard was reset
-(Fn+Esc+Q). Failures appear in the settings window and the log, plus one toast per session.
+Writes are coalesced (120 ms debounce). A write is skipped when the stamp in `gk6x_stamp_p2`
+(model, firmware, colours) matches. A failed write clears the stamp. The first write after each
+G-Helper launch happens anyway, in case the keyboard was reset (Fn+Esc+Q). Every write wipes the
+layer first (the keyboard refuses a write without it), so a change shows a brief dark moment.
+Failures appear in the settings window and the log, plus one toast per session.
 
 Allowlisted: Matrix Clix 60%, model 655491246 (0x271200AE), firmware 0x90206111 v1.33. This is an
 exact match for GK6X's "GK61-RGB-V2". Any other board only receives the three information queries.

@@ -267,7 +267,9 @@ static class Program
             kb.Identify();
             int before = fk.Writes.Count;
             T.Throws<Gk6xException>(() => kb.SetStaticColour(1, 255, 0, 0), "main profile (1, holds the Fn+\\ effects) is refused");
-            T.Check(Gk6xKeyboard.WritableLightingProfiles.SequenceEqual(new byte[] { 2, 3, 4 }), "writable: Fn+W (2) plus Fn+E/Fn+R (3/4) for the dark off-slot");
+            T.Check(Gk6xKeyboard.WritableLightingProfiles.SequenceEqual(new byte[] { 2 }), "writable: only Fn+W (2)");
+            T.Throws<Gk6xException>(() => kb.SetStaticColour(3, 255, 0, 0), "Fn+E (3, F-key lock layer) is refused");
+            T.Throws<Gk6xException>(() => kb.SetStaticColour(4, 255, 0, 0), "Fn+R (4, command lock layer) is refused");
             T.Check(fk.Writes.Count == before, "refused profiles: nothing sent");
             T.Throws<Gk6xException>(() => kb.SelectProfile(0), "profile 0 out of range");
             T.Throws<Gk6xException>(() => kb.SelectProfile(5), "profile 5 (driver/online mode) refused");
@@ -380,11 +382,12 @@ static class Program
             T.Throws<Gk6xException>(() => kb.SetLighting(2, new uint[10]), "wrong slot count refused");
             T.Throws<Gk6xException>(() => kb.SetLighting(1, slots), "profile 1 (Fn+] / Fn+\\ effects) still refused");
 
-            // dark off-slot: profile 4 written black, then selected
+            // lights off: black written into Fn+W (2), then selected
             before = fk.Writes.Count;
-            kb.SetLighting(4, new uint[Gk6xProtocol.StaticSlots]);
-            kb.SelectProfile(4);
-            T.Check(fk.Writes[before][1] == 0x21 && fk.Writes[before][2] == 4 && fk.Writes.Last()[1] == 0x0B && fk.Writes.Last()[2] == 4, "Fn+R profile can be blacked out and selected");
+            kb.SetLighting(2, new uint[Gk6xProtocol.StaticSlots]);
+            kb.SelectProfile(2);
+            T.Check(fk.Writes[before][1] == 0x21 && fk.Writes[before][2] == 2 && fk.Writes.Last()[1] == 0x0B && fk.Writes.Last()[2] == 2, "lights off = black into Fn+W, then select");
+            T.Throws<Gk6xException>(() => kb.SetLighting(4, new uint[Gk6xProtocol.StaticSlots]), "Fn+R is never written");
 
             // identity reuse: a second connection to the same keyboard skips the info queries
             var fk2 = new FakeKeyboard { ModelId = 655491246, FirmwareId = 0x90206111 };

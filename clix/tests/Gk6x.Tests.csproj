@@ -5,7 +5,7 @@
     <Nullable>annotations</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <NoWarn>CS8632;CS0168;CS0219</NoWarn>
+    <NoWarn>CS8632;CS0168;CS0219;CA1416</NoWarn>
   </PropertyGroup>
   <ItemGroup>
     <!-- Code under test, straight from the patch -->

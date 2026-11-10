@@ -6,6 +6,10 @@ colour, optional sync with the laptop keyboard). It replaces the blue breathing 
 the keyboard's Fn+W profile and leaves the Fn+\ reactive effects alone. The keyboard is USB 1EA7:0907, a
 GK6X-family board, probed as model 655491246, firmware 0x90206111.
 
+Fn+W is also the keyboard's arrow layer: while it is active, `/` is Up, Right Alt is Left, Menu is
+Down and Right Ctrl is Right. Fn+E and Fn+R are never used (they turn number and letter keys into
+F-keys and navigation keys). See `clix/docs/Gk6xKeyboard.md`.
+
 Nothing else in G-Helper changes, except that its built-in updater checks this fork's releases
 instead of seerge's.
 
@@ -19,7 +23,9 @@ instead of seerge's.
    appear exactly once. The script also checks that the labels and methods the integration depends on
    still exist. Any mismatch fails the run.
 4. Builds with upstream's own release command and publishes `GHelper.exe` and `GHelper.zip` under
-   the same tag.
+   the same tag. The release is titled "G-Helper Clix vX (Clix build N)", and its notes hold the newest
+   section of `clix/CHANGELOG.md` followed by the official G-Helper notes for that version. A forced
+   rebuild of the same version replaces the files and the notes in that one release.
 
 If any step fails, nothing is published, so the patched G-Helper never offers a broken build. GitHub
 sends a failure email and the patch needs updating.
@@ -31,7 +37,8 @@ sends a failure email and the patch needs updating.
 | `clix/src/Gk6x/` | The new G-Helper module, copied to `app/Peripherals/Keyboard/Gk6x/` |
 | `clix/apply_patch.py` | Copies the module and inserts the one-line hooks plus the updater URL |
 | `clix/badge_icons.py` | Adds a small pink dot to the app and tray icons; the window title and tray tooltip read "G-Helper Clix" |
-| `clix/tests/` | 123 tests: CRC, byte-for-byte comparison with GK6X, fail-closed cases, replay of the real keyboard replies, coalescing |
+| `clix/CHANGELOG.md` | Clix build history; bump the build number for every release |
+| `clix/tests/` | 133 tests: CRC, byte-for-byte comparison with GK6X, fail-closed cases, replay of the real keyboard replies, coalescing |
 | `clix/probe/Gk6xProbe.ps1` | Read-only identity probe |
 | `clix/docs/Gk6xKeyboard.md` | Wire format and behaviour |
 
