@@ -134,7 +134,13 @@ def main():
                  f'"https://api.github.com/repos/{fork}/releases/latest"')
     replace_once(upd, '"https://github.com/seerge/g-helper/releases"', f'"https://github.com/{fork}/releases"')
 
-    # 8. Pink dot on the app and tray icons, so this build is easy to tell apart from official G-Helper
+    # 8. Show the name "G-Helper Clix" in the window title and tray tooltip. The exe stays GHelper.exe,
+    #    because the updater and the auto-start task look for that file name.
+    replace_once(settings, 'Text = "G-Helper " + (ProcessHelper.IsUserAdministrator()',
+                 'Text = "G-Helper Clix " + (ProcessHelper.IsUserAdministrator()')
+    replace_once(program, 'Text = "G-Helper",', 'Text = "G-Helper Clix",')
+
+    # 9. Pink dot on the app and tray icons, so this build is easy to tell apart from official G-Helper
     icons = [app / "favicon.ico"] + [app / "Resources" / f"{n}.ico" for n in
              ("standard", "eco", "ultimate", "dark-standard", "dark-eco", "light-standard", "light-eco")]
     for ico in icons:
