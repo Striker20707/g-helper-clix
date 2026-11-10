@@ -58,7 +58,7 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
                 }
                 catch (Exception e)
                 {
-                    log("GK6X: sync failed: " + e.Message);
+                    log("sync failed: " + e.Message);
                 }
             }
         }

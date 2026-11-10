@@ -1,60 +1,81 @@
 # GK6X-family keyboards (USB 1EA7:0907), e.g. Matrix Clix 60%
 
-Opt-in support for a single static colour on GK6X-family boards, driven by G-Helper's existing laptop
-lighting controls. Code: `app/Peripherals/Keyboard/Gk6x/`. Hooks: 3 lines (see the end of this file).
+The Matrix Clix appears as its own peripheral tile in G-Helper, next to any ASUS mouse, keyboard or
+headset. Clicking the tile opens its settings window. Code: `app/Peripherals/Keyboard/Gk6x/`.
 
-## Enable
+## Settings window
 
-Add to `%AppData%\GHelper\config.json` (G-Helper closed):
-
-```json
-"gk6x_keyboard": 1
-```
-
-The keyboard's (model id, firmware id) must also be listed in `Gk6xKeyboard.SupportedModels`. Any other
-board only receives the three information queries, and its identity is logged.
-
-Allowlisted: Matrix Clix 60%, model 655491246 (0x271200AE), firmware 0x90206111 v1.33. This is an exact
-match for GK6X's "GK61-RGB-V2" entry (67 keys).
-
-## Behaviour
-
-| G-Helper control | Keyboard result |
-|---|---|
-| Laptop lighting colour (`aura_color`) | Every key slot set to that colour |
-| Laptop backlight level 0 / 1 / 2 / 3 (slider or hotkey) | 0 % (off, all black) / 33 % / 66 % / 100 % of the colour |
-| Animated laptop modes | Primary colour only, static. Nothing is streamed |
-| Lid close, sleep, idle timeout, ambient sensor | Ignored, so these never cause flash writes |
-
-The colour is stored by the keyboard itself (base-layer lighting slot), so it persists across unplug,
-reboot and G-Helper exit. G-Helper holds no handle and runs no thread between writes.
-
-Writes are coalesced (750 ms debounce, at least 2 s apart) and skipped when the (model, firmware, colour)
-stamp equals the last successful write (`gk6x_last_written`). A failed write clears the stamp.
-
-## Wire format (from pixeltris/GK6X @ 1348eafaac4b2e86855427618f2e806d0c4e3cf4)
-
-* Collection: VID 1EA7, PID 0907, max input and output report length both 65. Exactly one must exist.
-* Report: byte 0 = report id 0, then a 64-byte packet:
-  `[0] op, [1] sub, [2..5] args/offset/length, [6..7] CRC16 LE, [8..63] data`.
-* CRC16/CCITT-FALSE (poly 0x1021, init 0xFFFF) over all 64 packet bytes with bytes 6..7 zeroed.
-* Reply: same framing; op must match, CRC must validate. Info replies must also echo sub and carry result 1 at byte 2.
-  Unrelated input reports (for example Fn notifications) are skipped, up to 8 per request. Timeout 500 ms.
-
-| Step | Bytes (op sub arg) | Purpose |
+| Setting | Config key (default) | Effect |
 |---|---|---|
-| Identify | `01 09`, `01 01`, `01 08` | Buffer sizes; firmware id (u32) + version; model id (u32) + CRC of bytes 8..13 |
-| 1 | `21 01 06` | Clear lighting data (type 6) of the base layer only. Keys and macros are untouched |
-| 2 | `27 01` x 22 | One static effect: 32 x 16-byte effect table (entry 0 = {512, 1, 0, 0}, the rest -1), then u16 type 0, u16 704, 176 x u32 colour (LE R,G,B,A; A = FF, or 0 for black). Sent as 56-byte chunks, offset at bytes 2..3 and length at byte 5. As in GK6X, the final byte is not sent (1219 of 1220) |
-| 3 | `0B 01` | Re-select the base layer so the board reloads its lighting |
+| Lights on | `clix_on` (1) | Off writes black to every key |
+| Brightness | `clix_brightness` (100) | 0 to 100 % of the colour |
+| Color | `clix_color` (white) | Colour of every key |
+| Red keys | `clix_keys_mode` (0), `clix_keys_color` | Same as other keys / Off / Own color for the 15 red keycaps |
+| Sync with laptop | `clix_sync` (0) | Uses the laptop's `aura_color` and backlight level (0/1/2/3 = 0/33/66/100 %) instead of the Clix's own colour and brightness |
+| Switch to the G-Helper profile (Fn+W) when it connects | `clix_autoselect` (1) | Sends `0B 02` on connect and after every write |
+| Apply now | | Rewrites the lighting and switches to Fn+W |
 
-Only opcodes 01, 0B, 21 and 27 can be built (`Gk6xProtocol.AllowedOpcodes`). Restart (03), driver-mode
-realtime lighting (1A), key/macro/Fn writes (22/25/26/31) and firmware commands are unreachable.
+`"gk6x_keyboard": 0` in `%AppData%\GHelper\config.json` turns all Clix support off.
 
-## Hooks
+Red keys (LocationCode from GK6X `Data/device/655491246/data/keymap.js`): Esc 0, Backspace 14, Tab 22,
+`\` 36, Caps Lock 44, Enter 58, Left Shift 66, Right Shift 80, Left Ctrl 88, Win 89, Left Alt 90,
+Right Alt 98, Menu 99, Right Ctrl 100, Fn 102.
 
-* `USB/Aura.cs` `ApplyAura()`: `Gk6xKeyboards.RequestSync()` after the mode is logged.
-* `USB/Aura.cs` `ApplyBrightness()`: `RequestSync()` only for `"Slider"` and `"HotKey"`.
-* `Peripherals/PeripheralsProvider.cs` HID device-change timer: `RequestSync()`. This is a no-op when the stamp matches.
+## Where the lighting lives
 
-No ASUS class, packet or detector is changed, and no GK6X device enters the ASUS keyboard list.
+The keyboard has four onboard profiles: 1 = main (Fn+] blue breathing and the Fn+\ reactive effects),
+2 = Fn+W, 3 = Fn+E, 4 = Fn+R. G-Helper writes lighting **only to profile 2**. Profile 1 cannot be
+written: its lighting is a fixed firmware bank. Hardware test 2026-11-10: `21 01 03` and `24 01` were
+refused with status F0. Profiles 1, 3 and 4 are refused in code.
+
+The keyboard stores the colour and the selected profile itself. Both survive unplugging and rebooting
+(confirmed by the owner 2026-11-10). G-Helper holds no handle and runs no thread between writes, and
+it does no polling.
+
+Writes are coalesced (400 ms debounce, at least 1.5 s apart). A write is skipped when the stamp in
+`gk6x_last_written` (model, firmware, profile, colours) matches. A failed write clears the stamp. The
+first sync after each G-Helper launch rewrites once anyway, in case the keyboard was reset
+(Fn+Esc+Q). Failures appear in the settings window and the log, plus one toast per session.
+
+Allowlisted: Matrix Clix 60%, model 655491246 (0x271200AE), firmware 0x90206111 v1.33. This is an
+exact match for GK6X's "GK61-RGB-V2". Any other board only receives the three information queries.
+
+## Wire format
+
+Sources:
+* pixeltris/GK6X @ 1348eafa (MIT)
+* Vendor app behaviour observed in VladTop46/Skyloong-GK6Plus-Linux @ 9a86c850 (research only, no code copied)
+
+Reports and replies:
+* Collection: VID 1EA7, PID 0907, usage page 0xFF00, input and output reports both 65 bytes. Exactly one must exist.
+* Report layout: report id 0, then a 64-byte packet: `[0] op, [1] sub, [2..5] args/offset/length, [6..7] CRC16 LE, [8..63] data`.
+* CRC16/CCITT-FALSE (poly 0x1021, init 0xFFFF) over the packet with bytes 6..7 zeroed.
+* A reply must match the op and pass the CRC check. Info replies must also echo the sub and carry result 1 at byte 2.
+* Unrelated reports (Fn notifications) are skipped, up to 8 per request. Timeout is 500 ms.
+
+| Step | Bytes | Required reply status (byte 1) |
+|---|---|---|
+| Identify | `01 09`, `01 01`, `01 08` | result 1, valid model CRC |
+| Clear profile 2 lighting | `21 02 06` | 00 or 01 (F0 = refused, abort) |
+| Write | `27 02` × 22 chunks, 10 ms apart | 01 for every chunk |
+| Select / reload | `0B 02` | echoes 02 |
+
+The 1219-byte lighting blob consists of:
+* A 32 × 16-byte effect table: entry 0 = {512, 1, 0, 0}, the rest -1.
+* u16 type 0 and u16 704.
+* 176 × u32 colour, little-endian R,G,B,A (A = FF, or 0 for black), indexed by LocationCode.
+
+As in GK6X, the final byte is not sent.
+
+Only opcodes 01, 0B, 21 and 27 can be built (`Gk6xProtocol.AllowedOpcodes`). Restart, realtime
+lighting, key, macro and Fn writes, and firmware commands are unreachable.
+
+## Hooks (inserted by `clix/apply_patch.py`)
+
+* `Peripherals/PeripheralsProvider.cs`: Clix added to `AllPeripherals()` and `IsAnyPeripheralConnect()`; `Gk6xKeyboards.Detect()` in the HID device-change handler.
+* `Program.cs`: `Detect()` at startup.
+* `Settings.cs` `ButtonPeripheral_Click`: a Clix tile opens `Gk6xSettingsForm`.
+* `USB/Aura.cs`: `OnLaptopLightingChanged()` after `ApplyAura` and after `ApplyBrightness` for the `"Slider"` and `"HotKey"` labels only. It only acts when Sync with laptop is ticked.
+* `AutoUpdate/AutoUpdateControl.cs`: update check points at this fork.
+
+No ASUS class, packet or detector is changed.

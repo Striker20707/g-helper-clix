@@ -39,6 +39,13 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
             return result;
         }
 
+        /// <summary>Re-opens a previously identified collection by its device path (null if it is gone).</summary>
+        public static Gk6xHidTransport? TryOpenPath(string devicePath)
+        {
+            var d = FindCandidates().FirstOrDefault(c => c.DevicePath == devicePath);
+            return d is null ? null : TryOpen(d);
+        }
+
         public static Gk6xHidTransport? TryOpen(HidDevice device)
         {
             var config = new OpenConfiguration();

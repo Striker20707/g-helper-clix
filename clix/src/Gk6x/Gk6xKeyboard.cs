@@ -1,5 +1,5 @@
-// One GK6X-family keyboard: identity handshake and the single static-colour write.
-// No G-Helper dependencies; the transport is injected so tests can use a mock.
+// One GK6X-family keyboard: identity handshake, one static colour into an onboard profile's lighting
+// slot, and profile selection. No G-Helper dependencies; the transport is injected so tests can use a mock.
 
 using System;
 using System.Collections.Generic;
@@ -16,8 +16,14 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
         byte[]? Read(int timeoutMs);
     }
 
-    /// <summary>A (model, firmware) pair that has been verified on real hardware for static lighting.</summary>
-    public sealed record Gk6xSupportedModel(uint ModelId, uint FirmwareId, string Name);
+    /// <summary>
+    /// A (model, firmware) pair that has been verified on real hardware.
+    /// AccentLeds: LED slots (GK6X LocationCode) under the coloured modifier keycaps, which can get their own colour.
+    /// </summary>
+    public sealed record Gk6xSupportedModel(uint ModelId, uint FirmwareId, string Name, int[] AccentLeds)
+    {
+        public Gk6xSupportedModel(uint ModelId, uint FirmwareId, string Name) : this(ModelId, FirmwareId, Name, Array.Empty<int>()) { }
+    }
 
     public sealed class Gk6xException : Exception
     {
@@ -27,32 +33,55 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
     public sealed class Gk6xKeyboard : IDisposable
     {
         /// <summary>
-        /// Allowlist. Lighting writes are refused for anything not listed here.
-        /// Add an entry only after the identity probe has been run on that exact keyboard; see docs/Gk6xKeyboard.md.
+        /// The red keycaps on the black/red Matrix Clix, as LocationCodes from GK6X Data/device/655491246/data/keymap.js:
+        /// Esc 0, Backspace 14, Tab 22, \ 36, Caps Lock 44, Enter 58, Left Shift 66, Right Shift 80,
+        /// Left Ctrl 88, Win 89, Left Alt 90, Right Alt 98, Menu 99, Right Ctrl 100, Fn 102.
         /// </summary>
+        public static readonly int[] MatrixClixRedKeys = { 0, 14, 22, 36, 44, 58, 66, 80, 88, 89, 90, 98, 99, 100, 102 };
+
+        // Declared before SupportedModels: static fields initialise in textual order.
+        /// <summary>Allowlist. Writes are refused for anything not listed here.</summary>
         public static readonly List<Gk6xSupportedModel> SupportedModels = new()
         {
             // Matrix Clix 60% (mechanical, black/red). Probed 2026-11-10: model 655491246 (0x271200AE),
-            // firmware 0x90206111 v1.33, buffers 15/8. Exact match for GK6X modellist.json "GK61-RGB-V2"
-            // (67 keys, highest LED location code 102 < 176 static slots).
-            new Gk6xSupportedModel(ModelId: 655491246, FirmwareId: 0x90206111, Name: "Matrix Clix 60% (GK61-RGB-V2)"),
+            // firmware 0x90206111 v1.33, buffers 15/8. Exact match for GK6X modellist.json "GK61-RGB-V2".
+            // Hardware-verified 2026-11-10: lighting write to profile 2 (Fn+W) shows solid colour.
+            new Gk6xSupportedModel(ModelId: 655491246, FirmwareId: 0x90206111, Name: "Matrix Clix", AccentLeds: MatrixClixRedKeys),
         };
 
+
+        /// <summary>
+        /// Onboard profiles: 1 = main (blue breathing, Fn+] and Fn+\ effects), 2 = Fn+W, 3 = Fn+E, 4 = Fn+R.
+        /// G-Helper only ever writes lighting to profile 2, which was empty (dark) on the tested keyboard.
+        /// Profile 1 is deliberately not writable here: that would erase the Fn+\ effect list.
+        /// </summary>
+        public const byte GHelperProfile = 2;
+        public static readonly byte[] WritableLightingProfiles = { GHelperProfile };
+
         public const int ReplyTimeoutMs = 500;
-        /// <summary>Unsolicited reports (e.g. Fn layer notifications) tolerated while waiting for one reply.</summary>
+        /// <summary>Unsolicited reports (e.g. Fn notifications) tolerated while waiting for one reply.</summary>
         public const int MaxSkippedReports = 8;
+        /// <summary>Pause between lighting chunks, as the vendor app does (SLEEP_TO_WRITE, 10 ms).</summary>
+        public const int ChunkDelayMs = 10;
+
+        // Write status (reply byte 1), observed on the Matrix Clix 2026-11-10:
+        //   21 xx 06 clear accepted -> 00, 27 chunk accepted -> 01, unsupported request -> F0.
+        public static bool ClearAccepted(byte status) => status == 0x00 || status == 0x01;
+        public static bool ChunkAccepted(byte status) => status == 0x01;
 
         private readonly IGk6xTransport transport;
         private readonly Action<string> log;
+        private readonly Action<int> sleep;
         private readonly object ioLock = new();
 
         public Gk6xIdentity? Identity { get; private set; }
         public Gk6xSupportedModel? Model { get; private set; }
 
-        public Gk6xKeyboard(IGk6xTransport transport, Action<string>? log = null)
+        public Gk6xKeyboard(IGk6xTransport transport, Action<string>? log = null, Action<int>? sleep = null)
         {
             this.transport = transport;
             this.log = log ?? (_ => { });
+            this.sleep = sleep ?? (ms => System.Threading.Thread.Sleep(ms));
         }
 
         public string Path => transport.Path;
@@ -82,7 +111,7 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
 
                 Identity = new Gk6xIdentity(bufA, bufB, fw, major, minor, model);
                 Model = SupportedModels.Find(m => m.ModelId == model && m.FirmwareId == fw);
-                log("GK6X: " + Identity + (Model is null ? " - not in allowlist, lighting disabled" : " - " + Model.Name));
+                log("GK6X: " + Identity + (Model is null ? " - not in allowlist, writes disabled" : " - " + Model.Name));
                 return Identity;
             }
         }
@@ -90,23 +119,56 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
         public bool IsSupported => Model is not null;
 
         /// <summary>
-        /// Writes one static colour to the base layer's onboard lighting slot (flash write) and re-selects the
-        /// base layer so the keyboard reloads it. Sequence: 21 01 06 (clear base-layer lighting only),
-        /// 27 01 x22 chunks (one static effect), 0B 01 (select base layer). Nothing else is sent.
+        /// Replaces the lighting of one onboard profile with a single static colour (stored in the keyboard's
+        /// flash). Sequence: 21 pp 06 (clear that profile's lighting list), 27 pp x22 (one static effect).
+        /// Every reply must carry an accepted status; the first refusal aborts with no retries.
         /// </summary>
-        public void SetStaticColour(byte r, byte g, byte b)
+        public void SetStaticColour(byte profile, byte r, byte g, byte b) => SetStaticColours(profile, (r, g, b), null);
+
+        /// <summary>
+        /// Like SetStaticColour, but the model's accent keys (AccentLeds) get their own colour when accent is given.
+        /// (0,0,0) turns a group off.
+        /// </summary>
+        public void SetStaticColours(byte profile, (byte r, byte g, byte b) main, (byte r, byte g, byte b)? accent)
         {
             lock (ioLock)
             {
                 if (Model is null) throw new Gk6xException("keyboard model not verified; refusing lighting write");
+                if (Array.IndexOf(WritableLightingProfiles, profile) < 0)
+                    throw new Gk6xException($"profile {profile} is not writable by G-Helper");
 
-                Exchange(Gk6xProtocol.OpLayerResetDataType, Gk6xProtocol.LayerBase, false, Gk6xProtocol.DataTypeLighting);
+                byte[] p = Exchange(Gk6xProtocol.OpLayerResetDataType, profile, false, Gk6xProtocol.DataTypeLighting);
+                if (!ClearAccepted(p[1])) throw new Gk6xException($"keyboard refused lighting clear (status 0x{p[1]:X2})");
 
-                byte[] payload = Gk6xProtocol.BuildStaticLightingPayload(r, g, b);
-                foreach (byte[] report in Gk6xProtocol.BuildChunkedReports(Gk6xProtocol.OpLayerSetLightValues, Gk6xProtocol.LayerBase, payload))
-                    SendAndAck(report, Gk6xProtocol.OpLayerSetLightValues);
+                uint[] slots = new uint[Gk6xProtocol.StaticSlots];
+                Array.Fill(slots, Gk6xProtocol.EncodeColour(main.r, main.g, main.b));
+                if (accent is { } a)
+                {
+                    uint ac = Gk6xProtocol.EncodeColour(a.r, a.g, a.b);
+                    foreach (int led in Model.AccentLeds)
+                        if (led >= 0 && led < slots.Length) slots[led] = ac;
+                }
+                byte[] payload = Gk6xProtocol.BuildStaticLightingPayload(slots);
+                int n = 0;
+                foreach (byte[] report in Gk6xProtocol.BuildChunkedReports(Gk6xProtocol.OpLayerSetLightValues, profile, payload))
+                {
+                    n++;
+                    p = SendAndAck(report, Gk6xProtocol.OpLayerSetLightValues);
+                    if (!ChunkAccepted(p[1])) throw new Gk6xException($"keyboard refused lighting chunk {n} (status 0x{p[1]:X2})");
+                    sleep(ChunkDelayMs);
+                }
+            }
+        }
 
-                Exchange(Gk6xProtocol.OpSetLayer, Gk6xProtocol.LayerBase, false);
+        /// <summary>Switches the keyboard to an onboard profile (same as pressing Fn+W/E/R). Reply echoes the profile.</summary>
+        public void SelectProfile(byte profile)
+        {
+            lock (ioLock)
+            {
+                if (Model is null) throw new Gk6xException("keyboard model not verified; refusing profile switch");
+                if (profile < 1 || profile > 4) throw new Gk6xException($"profile {profile} out of range");
+                byte[] p = Exchange(Gk6xProtocol.OpSetLayer, profile, false);
+                if (p[1] != profile) throw new Gk6xException($"profile switch not confirmed (reply 0x{p[1]:X2})");
             }
         }
 

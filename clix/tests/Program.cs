@@ -92,7 +92,7 @@ static class Reference
     }
 }
 
-enum Fault { None, Timeout, BadCrc, BadResult, WrongSub, ShortReport, Disconnect, BadModelCrc, ReportIdNonZero }
+enum Fault { None, Timeout, BadCrc, BadResult, WrongSub, ShortReport, Disconnect, BadModelCrc, ReportIdNonZero, Refuse, WrongProfileEcho }
 
 /// Simulated keyboard firmware. Validates every incoming report and answers like the GK6X source expects.
 sealed class FakeKeyboard : IGk6xTransport
@@ -122,7 +122,10 @@ sealed class FakeKeyboard : IGk6xTransport
             if (Fault == Fault.BadModelCrc) crc ^= 1;
             BitConverter.GetBytes(crc).CopyTo(data, 6);
         }
-        byte[] r = Make(op, sub, 1, data);
+        // Replies as observed on the real Matrix Clix: packet byte 1 is the status for writes
+        // (21 clear -> 00, 27 chunk -> 01, unsupported -> F0); 0B echoes the profile; info echoes the sub.
+        byte status = op switch { 0x21 => 0x00, 0x27 => 0x01, 0x0B => sub, _ => sub };
+        byte[] r = Make(op, status, 1, data);
         bool hit = FaultOnOp is null || FaultOnOp == op;
         if (hit)
         {
@@ -134,6 +137,8 @@ sealed class FakeKeyboard : IGk6xTransport
                 case Fault.WrongSub: r = Make(op, (byte)(sub + 1), 1, data); break;
                 case Fault.ShortReport: r = r.Take(33).ToArray(); break;
                 case Fault.ReportIdNonZero: r[0] = 2; break;
+                case Fault.Refuse: r = Make(op, 0xF0, 0, data); break;
+                case Fault.WrongProfileEcho: r = Make(op, (byte)(sub + 1), 0, data); break;
             }
         }
         replies.Enqueue(r);
@@ -156,6 +161,9 @@ sealed class FakeKeyboard : IGk6xTransport
 static class Program
 {
     static readonly Gk6xSupportedModel TestModel = new(656801979, 0x90219010, "test");
+
+    static readonly Gk6xSupportedModel ShippedModel = Gk6xKeyboard.SupportedModels.Single();
+    static Program() { } // explicit cctor: ShippedModel is captured before any test clears the list
 
     static void Allow(bool on)
     {
@@ -217,7 +225,7 @@ static class Program
             var id = kb.Identify();
             T.Check(id.ModelId == 656801979 && id.FirmwareId == 0x90219010 && id.FirmwareMajor == 1 && id.FirmwareMinor == 19, "identity parsed");
             T.Check(!kb.IsSupported, "unknown model not supported");
-            T.Throws<Gk6xException>(() => kb.SetStaticColour(255, 0, 0), "unknown model refuses lighting write");
+            T.Throws<Gk6xException>(() => kb.SetStaticColour(2, 255, 0, 0), "unknown model refuses lighting write");
             T.Check(fk.Writes.Count == 3 && fk.Writes.All(w => w[1] == 0x01), "unknown model: only the 3 info queries were sent");
         }
 
@@ -230,21 +238,72 @@ static class Program
             T.Check(!kb.IsSupported, "same model id but different firmware id not supported");
         }
 
-        // ---- Supported model: exact write sequence ----
+        // ---- Supported model: exact write sequence into the Fn+W profile ----
         {
             var fk = new FakeKeyboard { UnsolicitedBeforeEachReply = 2 };
-            var kb = new Gk6xKeyboard(fk);
+            var sleeps = new List<int>();
+            var kb = new Gk6xKeyboard(fk, null, ms => sleeps.Add(ms));
             kb.Identify();
             T.Check(kb.IsSupported, "allowlisted model supported");
-            kb.SetStaticColour(102, 0, 204);
+            kb.SetStaticColour(Gk6xKeyboard.GHelperProfile, 102, 0, 204);
             var ops = fk.Writes.Select(w => w[1]).ToList();
-            T.Check(ops.Count == 3 + 1 + 22 + 1, $"3 info + 1 reset + 22 lighting + 1 layer = 27 writes (got {ops.Count})");
-            T.Check(ops.Skip(3).First() == 0x21 && fk.Writes[3][2] == 1 && fk.Writes[3][3] == 6, "reset targets base layer lighting (type 6) only");
-            T.Check(ops.Skip(4).Take(22).All(o => o == 0x27), "22 x 0x27");
-            T.Check(ops.Last() == 0x0B && fk.Writes.Last()[2] == 1, "ends with select base layer");
+            T.Check(ops.Count == 3 + 1 + 22, $"3 info + 1 clear + 22 lighting = 26 writes (got {ops.Count})");
+            T.Check(ops[3] == 0x21 && fk.Writes[3][2] == 2 && fk.Writes[3][3] == 6, "clear targets Fn+W profile (2) lighting (type 6) only");
+            T.Check(ops.Skip(4).All(o => o == 0x27) && fk.Writes.Skip(4).All(w => w[2] == 2), "22 x 0x27 to profile 2");
+            T.Check(fk.Writes.Skip(4).Select(w => w.Skip(9).Take(56).ToArray()).SelectMany(x => x).Take(1219).SequenceEqual(
+                Gk6xProtocol.BuildStaticLightingPayload(102, 0, 204)), "chunks carry the payload in order");
+            T.Check(sleeps.Count == 22 && sleeps.All(x => x == Gk6xKeyboard.ChunkDelayMs), "10 ms pause after each chunk, like the vendor app");
             T.Check(ops.All(o => Gk6xProtocol.AllowedOpcodes.Contains(o)), "no opcode outside the allowlist");
             T.Check(fk.IncomingCrcErrors == 0, "fake firmware saw no CRC errors");
-            T.Check(!ops.Contains(0x03), "no restart/bootloader command");
+            T.Check(!ops.Contains(0x03) && !ops.Contains(0x0B), "no restart command, no profile switch unless asked");
+
+            int before = fk.Writes.Count;
+            kb.SelectProfile(2);
+            T.Check(fk.Writes.Count == before + 1 && fk.Writes.Last()[1] == 0x0B && fk.Writes.Last()[2] == 2, "SelectProfile(2) sends exactly 0B 02");
+        }
+        {
+            var fk = new FakeKeyboard();
+            var kb = new Gk6xKeyboard(fk, null, _ => { });
+            kb.Identify();
+            int before = fk.Writes.Count;
+            T.Throws<Gk6xException>(() => kb.SetStaticColour(1, 255, 0, 0), "main profile (1, holds the Fn+\\ effects) is refused");
+            T.Throws<Gk6xException>(() => kb.SetStaticColour(3, 255, 0, 0), "Fn+E profile (3) is refused");
+            T.Throws<Gk6xException>(() => kb.SetStaticColour(4, 255, 0, 0), "Fn+R profile (4) is refused");
+            T.Check(fk.Writes.Count == before, "refused profiles: nothing sent");
+            T.Throws<Gk6xException>(() => kb.SelectProfile(0), "profile 0 out of range");
+            T.Throws<Gk6xException>(() => kb.SelectProfile(5), "profile 5 (driver/online mode) refused");
+            T.Check(fk.Writes.Count == before, "out-of-range profile switch: nothing sent");
+        }
+        {
+            var fk = new FakeKeyboard { Fault = Fault.Refuse, FaultOnOp = 0x21 };
+            var kb = new Gk6xKeyboard(fk, null, _ => { });
+            kb.Identify();
+            T.Throws<Gk6xException>(() => kb.SetStaticColour(2, 1, 2, 3), "status F0 on clear (seen on real keyboard) aborts");
+            T.Check(fk.Writes.Count(w => w[1] == 0x27) == 0, "after a refused clear no lighting chunk is sent");
+        }
+        {
+            var fk = new FakeKeyboard();
+            var kb = new Gk6xKeyboard(fk, null, _ => { });
+            kb.Identify();
+            fk.Fault = Fault.Refuse; fk.FaultOnOp = 0x27;
+            T.Throws<Gk6xException>(() => kb.SetStaticColour(2, 1, 2, 3), "status F0 on a lighting chunk aborts");
+            T.Check(fk.Writes.Count(w => w[1] == 0x27) == 1, "stops after the first refused chunk");
+        }
+        {
+            var fk = new FakeKeyboard();
+            var kb = new Gk6xKeyboard(fk, null, _ => { });
+            kb.Identify();
+            fk.Fault = Fault.WrongProfileEcho; fk.FaultOnOp = 0x0B;
+            T.Throws<Gk6xException>(() => kb.SelectProfile(2), "profile switch not echoed -> reported as failure");
+        }
+        {
+            Allow(false);
+            var fk = new FakeKeyboard();
+            var kb = new Gk6xKeyboard(fk, null, _ => { });
+            kb.Identify();
+            T.Throws<Gk6xException>(() => kb.SelectProfile(2), "unknown model: profile switch refused");
+            T.Check(fk.Writes.All(w => w[1] == 0x01), "unknown model: only info queries");
+            Allow(true);
         }
 
         // ---- Malformed replies / failures ----
@@ -259,11 +318,11 @@ static class Program
         foreach (Fault f in new[] { Fault.Timeout, Fault.BadCrc, Fault.ShortReport })
         {
             var fk = new FakeKeyboard();
-            var kb = new Gk6xKeyboard(fk);
+            var kb = new Gk6xKeyboard(fk, null, _ => { });
             kb.Identify();
             fk.Fault = f; fk.FaultOnOp = 0x27;
             int before = fk.Writes.Count;
-            T.Throws<Gk6xException>(() => kb.SetStaticColour(1, 2, 3), $"lighting write aborts on {f}");
+            T.Throws<Gk6xException>(() => kb.SetStaticColour(2, 1, 2, 3), $"lighting write aborts on {f}");
             T.Check(fk.Writes.Count - before == 2, $"{f}: stopped after the first failed chunk, no retries (sent {fk.Writes.Count - before})");
         }
         {
@@ -271,7 +330,7 @@ static class Program
             var kb = new Gk6xKeyboard(fk);
             kb.Identify();
             fk.Fault = Fault.Disconnect; fk.FaultOnOp = 0x27;
-            T.Throws<IOException>(() => kb.SetStaticColour(1, 2, 3), "unplug mid-write surfaces as an exception (caught by coalescer)");
+            T.Throws<IOException>(() => kb.SetStaticColour(2, 1, 2, 3), "unplug mid-write surfaces as an exception (caught by coalescer)");
             kb.Dispose();
             T.Check(fk.Disposed, "transport disposed");
         }
@@ -301,6 +360,46 @@ static class Program
             var bad = new Gk6xCoalescer(() => throw new IOException("unplugged"), 10, 0, _ => errs++);
             bad.Request()!.Wait(2000);
             T.Check(errs == 1, "exceptions logged once, worker exits (no retry loop)");
+        }
+
+        // ---- Shipped allowlist entry carries the red-keycap LED list (static init order) ----
+        {
+            T.Check(ShippedModel.AccentLeds != null && ShippedModel.AccentLeds.Length == 15, "shipped Matrix Clix entry has 15 red-key LEDs (not null)");
+            T.Check(ShippedModel.AccentLeds.SequenceEqual(new[] { 0, 14, 22, 36, 44, 58, 66, 80, 88, 89, 90, 98, 99, 100, 102 }),
+                "red keys = Esc, Backspace, Tab, \\, Caps, Enter, Shifts, Ctrls, Win, Alts, Menu, Fn (GK6X keymap.js LocationCodes)");
+        }
+
+        // ---- Red keys: own colour / off ----
+        {
+            uint[] Slots(byte[] payload) => Enumerable.Range(0, Gk6xProtocol.StaticSlots - 1)
+                .Select(i => BitConverter.ToUInt32(payload, 512 + 4 + i * 4)).ToArray();
+            Gk6xKeyboard.SupportedModels.Clear();
+            Gk6xKeyboard.SupportedModels.Add(ShippedModel);
+            byte[] Captured(FakeKeyboard f) => f.Writes.Where(w => w[1] == 0x27).Select(w => w.Skip(9).Take(56).ToArray()).SelectMany(x => x).Take(1219).ToArray();
+
+            var fk = new FakeKeyboard { ModelId = 655491246, FirmwareId = 0x90206111 };
+            var kb = new Gk6xKeyboard(fk, null, _ => { });
+            kb.Identify();
+            T.Check(kb.IsSupported, "Matrix Clix identity supported by shipped entry");
+            kb.SetStaticColours(2, (0, 255, 255), (255, 0, 0));
+            var slots = Slots(Captured(fk));
+            var red = ShippedModel.AccentLeds.ToHashSet();
+            T.Check(red.All(i => slots[i] == Gk6xProtocol.EncodeColour(255, 0, 0)), "red keys get their own colour");
+            T.Check(Enumerable.Range(0, slots.Length).Where(i => !red.Contains(i)).All(i => slots[i] == Gk6xProtocol.EncodeColour(0, 255, 255)), "every other slot gets the main colour");
+
+            fk = new FakeKeyboard { ModelId = 655491246, FirmwareId = 0x90206111 };
+            kb = new Gk6xKeyboard(fk, null, _ => { });
+            kb.Identify();
+            kb.SetStaticColours(2, (0, 255, 255), (0, 0, 0));
+            slots = Slots(Captured(fk));
+            T.Check(red.All(i => slots[i] == 0), "red keys off = slot value 0");
+            T.Check(slots[24] == Gk6xProtocol.EncodeColour(0, 255, 255), "Q stays main colour");
+
+            fk = new FakeKeyboard { ModelId = 655491246, FirmwareId = 0x90206111 };
+            kb = new Gk6xKeyboard(fk, null, _ => { });
+            kb.Identify();
+            kb.SetStaticColours(2, (10, 20, 30), null);
+            T.Check(Captured(fk).SequenceEqual(Gk6xProtocol.BuildStaticLightingPayload(10, 20, 30)), "no accent = identical to the single-colour payload");
         }
 
         // ---- Shipped allowlist: exactly the probed Matrix Clix, nothing else ----

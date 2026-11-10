@@ -1,7 +1,9 @@
 # G-Helper + Matrix Clix lighting
 
-This fork builds the **official** G-Helper releases with one addition: G-Helper's laptop lighting
-colour and backlight level also drive a Matrix Clix 60% keyboard. The keyboard is USB 1EA7:0907, a
+This fork builds the **official** G-Helper releases with one addition: the Matrix Clix 60% keyboard
+shows up as its own device tile with its own lighting settings (colour, brightness, on/off, red-keycap
+colour, optional sync with the laptop keyboard). It replaces the blue breathing with static colour in
+the keyboard's Fn+W profile and leaves the Fn+\ reactive effects alone. The keyboard is USB 1EA7:0907, a
 GK6X-family board, probed as model 655491246, firmware 0x90206111.
 
 Nothing else in G-Helper changes, except that its built-in updater checks this fork's releases
@@ -27,8 +29,8 @@ sends a failure email and the patch needs updating.
 | Path | Purpose |
 |---|---|
 | `clix/src/Gk6x/` | The new G-Helper module, copied to `app/Peripherals/Keyboard/Gk6x/` |
-| `clix/apply_patch.py` | Copies the module and adds 3 one-line hooks plus the updater URL |
-| `clix/tests/` | 99 tests: CRC, byte-for-byte comparison with GK6X, fail-closed cases, replay of the real keyboard replies, coalescing |
+| `clix/apply_patch.py` | Copies the module and inserts the one-line hooks plus the updater URL |
+| `clix/tests/` | 123 tests: CRC, byte-for-byte comparison with GK6X, fail-closed cases, replay of the real keyboard replies, coalescing |
 | `clix/probe/Gk6xProbe.ps1` | Read-only identity probe |
 | `clix/docs/Gk6xKeyboard.md` | Wire format and behaviour |
 
@@ -36,11 +38,12 @@ sends a failure email and the patch needs updating.
 
 1. Download `GHelper.exe` from this fork's latest release.
 2. Quit G-Helper and keep a copy of your current exe.
-3. Replace the exe, then add `"gk6x_keyboard": 1` to `%AppData%\GHelper\config.json`.
-4. Start G-Helper and pick a colour. If the keyboard still shows a reactive effect, press Fn+\.
+3. Replace the exe and start G-Helper. A "Matrix Clix" tile appears when the keyboard is plugged in.
+4. Click the tile and pick a colour. The keyboard switches to its Fn+W profile and shows it.
+   Press Fn+W to go back to the keyboard's own effects, and press it again to return.
 
 ## Rollback
 
-* Remove `gk6x_keyboard` from the config to turn the integration off.
+* Add `"gk6x_keyboard": 0` to `%AppData%\GHelper\config.json` to turn the integration off.
 * Or run the official exe again. Nothing else was installed.
-* The keyboard keeps its last colour either way. Fn+\ and Fn+] still switch effects on the keyboard.
+* The keyboard keeps its Fn+W colour either way. The Fn+] and Fn+\ effects were never touched.

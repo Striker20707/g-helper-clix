@@ -134,6 +134,18 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
         /// </summary>
         public static byte[] BuildStaticLightingPayload(byte r, byte g, byte b)
         {
+            uint[] slots = new uint[StaticSlots];
+            Array.Fill(slots, EncodeColour(r, g, b));
+            return BuildStaticLightingPayload(slots);
+        }
+
+        /// <summary>
+        /// Same blob with one colour per LED slot (index = the key's LocationCode in the GK6X device data,
+        /// as GK6X UserDataFile.LoadStatic does). Values come from EncodeColour.
+        /// </summary>
+        public static byte[] BuildStaticLightingPayload(uint[] slotColours)
+        {
+            if (slotColours.Length != StaticSlots) throw new ArgumentException($"need {StaticSlots} slot colours");
             const int header = MaxEffects * 16;
             byte[] data = new byte[header + 4 + StaticBytes];
             var w = new BinaryWriter(new MemoryStream(data));
@@ -144,8 +156,7 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
             }
             w.Write(EffectTypeStatic);
             w.Write((ushort)StaticBytes);
-            uint colour = EncodeColour(r, g, b);
-            for (int i = 0; i < StaticSlots; i++) w.Write(colour);
+            foreach (uint colour in slotColours) w.Write(colour);
             w.Flush();
             // GK6X sends one byte less than it builds: its Packet.SetIndex() refuses Index == Length, so
             // GetWrittenBuffer() returns Length - 1 bytes (the alpha byte of slot 175 is dropped).
