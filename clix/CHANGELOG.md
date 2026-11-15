@@ -4,6 +4,27 @@ Each release on this fork is named after the official G-Helper version it is bui
 v0.291), because G-Helper's updater compares that number. A rebuild of the same version replaces the
 files in that release, so the "Clix build" number below is what tells builds apart.
 
+## Clix build 9
+- Easier to tell apart: the app, taskbar and tray icons now have a thick purple ring instead of a small
+  pink dot, so the Clix build stands out even at tray size and on light or dark taskbars. The version line
+  in the main window reads "0.291 Clix 9".
+- Updates: G-Helper's own updater now offers new Clix builds of the same official version (before, a Clix
+  rebuild under v0.291 was never offered, because the version number didn't change). The prompt names the
+  Clix build, and skipping one doesn't hide the next.
+- Startup and charge-limit tasks: the Clix build now uses its own task names ("GHelperClix_..." and
+  "GHelperClixCharge"). Before, it treated official G-Helper's "GHelper" task as its own, so after an update
+  it could delete that task and point a new, enabled one at the Clix exe. Official G-Helper's tasks are never
+  touched now.
+- Crash safety: if G-Helper crashes in Clix code, it restarts at once with the Clix keyboard support off for
+  this build (everything else keeps working, and the keyboard keeps its stored Fn+W colours). Only if the
+  Clix build can't start at all, twice in a row, does it start the official G-Helper for that session
+  (found from its own disabled startup task, or "clix_fallback_exe" in config.json). Details: clix/README.md.
+- Ready for the next official G-Helper: upstream moved its per-key grid into a shared KeyGrid after v0.291,
+  which would have broken the next Clix build. The patch now supports both layouts.
+- Builds: every Clix change merged into the clix branch is built and released automatically when its build
+  number goes up, and a daily check builds the patch against upstream's development code, so a breaking
+  upstream change is caught before it's released.
+
 ## Clix build 8
 - Live lighting: while G-Helper runs, the Clix shows G-Helper's colours directly, like the vendor app's
   online mode. Changes appear instantly (as fast as the laptop keyboard), with no flash and nothing written

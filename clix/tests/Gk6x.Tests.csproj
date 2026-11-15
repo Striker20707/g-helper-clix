@@ -15,6 +15,7 @@
     <Compile Include="../src/Gk6x/Gk6xKeyTables.cs" />
     <Compile Include="../src/Gk6x/Gk6xEffects.cs" />
     <Compile Include="../src/Gk6x/Gk6xLayout.cs" />
+    <Compile Include="../src/Gk6x/ClixUpdate.cs" />
 
   </ItemGroup>
 </Project>

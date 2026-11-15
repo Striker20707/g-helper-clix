@@ -54,8 +54,8 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
         /// </summary>
         public static bool Live => AppConfig.Get("clix_live", 1) != 0;
 
-        /// <summary>Master switch: "gk6x_keyboard": 0 in config.json disables all Clix support.</summary>
-        public static bool Enabled => AppConfig.Get("gk6x_keyboard", 1) != 0;
+        /// <summary>Master switch: "gk6x_keyboard": 0 in config.json disables all Clix support; also off in Clix safe mode (ClixGuard).</summary>
+        public static bool Enabled => AppConfig.Get("gk6x_keyboard", 1) != 0 && !ClixGuard.SafeMode;
     }
 
     public static partial class Gk6xKeyboards
@@ -99,6 +99,7 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
 
         public static void Detect()
         {
+            ClixGuard.NotifyIfSafe();
             if (!Gk6xSettings.Enabled) return;
             try
             {

@@ -1,7 +1,10 @@
-"""Adds a small pink dot (bottom right) to every frame of an .ico file, in place.
+"""Marks every frame of an .ico file with a purple ring, in place.
 
 Used by apply_patch.py so the patched G-Helper's exe, window and tray icons are easy to tell apart
-from the official app. Needs Pillow.
+from the official app. The original icon is shrunk a little and a thick purple ring is drawn around it,
+with a transparent gap between the two. Unlike a corner dot, the ring stays obvious at 16 px in the tray
+and on light or dark taskbars, and works for every tray icon colour (blue, green, red, white, black).
+Needs Pillow.
 """
 import io
 import pathlib
@@ -9,21 +12,24 @@ import struct
 import sys
 from PIL import Image, ImageDraw
 
-BADGE = (236, 72, 153, 255)   # pink, not used by G-Helper's eco/standard/ultimate icons
-RING = (20, 20, 20, 255)
+RING = (176, 72, 255, 255)    # purple, not used by any of G-Helper's own icons
+INNER = 0.74                  # the original icon's size inside the ring
+RING_WIDTH = 0.095            # ring thickness, as a share of the icon size
+
 
 def badge(frame):
     s = frame.size[0]
     big = 4
-    im = frame.convert("RGBA").resize((s * big, s * big), Image.LANCZOS)
-    d = ImageDraw.Draw(im)
     S = s * big
-    r = S * 0.16                      # badge radius
-    cx, cy = S - r - S * 0.01, S - r - S * 0.01
-    ring = max(big, S * 0.035)
-    d.ellipse((cx - r - ring, cy - r - ring, cx + r + ring, cy + r + ring), fill=RING)
-    d.ellipse((cx - r, cy - r, cx + r, cy + r), fill=BADGE)
-    return im.resize((s, s), Image.LANCZOS)
+    out = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    d = ImageDraw.Draw(out)
+    d.ellipse((0, 0, S - 1, S - 1), fill=RING)
+    w = S * RING_WIDTH
+    d.ellipse((w, w, S - 1 - w, S - 1 - w), fill=(0, 0, 0, 0))
+    inner = frame.convert("RGBA").resize((round(S * INNER), round(S * INNER)), Image.LANCZOS)
+    o = (S - inner.size[0]) // 2
+    out.alpha_composite(inner, (o, o))
+    return out.resize((s, s), Image.LANCZOS)
 
 def _dib(im, header=None):
     """32-bit BGRA DIB as stored in .ico files (bottom-up, height doubled, 1-bit AND mask).
