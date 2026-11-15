@@ -1,35 +1,56 @@
 name: Clix patched release
 
-# Builds the latest official G-Helper release with the Matrix Clix (GK6X) patch from clix/ and
-# publishes it here under the same tag. The patched G-Helper's updater checks this fork's releases.
-# If the patch, the tests or the build fail, the run fails (GitHub sends a failure email) and
-# nothing is published, so the patched updater never offers a broken build.
+# Builds official G-Helper with the Matrix Clix (GK6X) patch from clix/ and publishes it here, so the patched
+# G-Helper's own updater picks it up.
+#
+# When it runs:
+#  * daily: a new official G-Helper release is built and published as soon as it appears
+#  * on every push to the clix branch: a new "## Clix build N" in clix/CHANGELOG.md is built and published
+#    (a push that doesn't raise N is only built and tested)
+#  * on pull requests to clix: built and tested only, never published
+#  * by hand (Actions tab): optionally a specific upstream tag, or "force" to rebuild what's there
+#
+# Compatibility: the "upstream-main" job applies and builds the same patch against seerge/g-helper's
+# development branch every day, so a change that will break the next official release shows up early.
+# If the patch, the tests or the build fail, nothing is published (the installed Clix build keeps working and
+# is simply not updated), GitHub emails the failure, and an issue is opened here when issues are enabled.
 
 on:
   schedule:
     - cron: '17 10 * * *'   # daily, 02:17 Pacific (standard time)
+  push:
+    branches: [clix]
+    paths: ['clix/**', '.github/workflows/clix-release.yml']
+  pull_request:
+    branches: [clix]
   workflow_dispatch:
     inputs:
       tag:
         description: 'Upstream tag to build (empty = latest official release)'
         required: false
       force:
-        description: 'Rebuild even if this tag is already released here'
+        description: 'Rebuild even if this tag and Clix build are already released here'
         type: boolean
         default: false
 
 permissions:
   contents: write
+  issues: write
 
 concurrency:
-  group: clix-release
+  group: clix-${{ github.event_name == 'pull_request' && github.ref || 'release' }}
   cancel-in-progress: false
 
 jobs:
   release:
     runs-on: windows-2022
     steps:
-      - name: Find upstream release
+      - name: Checkout this fork (patch files)
+        uses: actions/checkout@v7
+        with:
+          path: fork
+
+      - name: Decide what to build
         id: up
         shell: pwsh
         env:
@@ -38,19 +59,26 @@ jobs:
           $tag = "${{ inputs.tag }}"
           if (-not $tag) { $tag = gh api repos/seerge/g-helper/releases/latest --jq .tag_name }
           if (-not $tag) { throw "Could not read the latest seerge/g-helper release" }
-          gh release view $tag --repo "${{ github.repository }}" *> $null
+          $log = Get-Content fork/clix/CHANGELOG.md -Raw
+          $m = [regex]::Match($log, '(?m)^## Clix build (\d+)\s*$')
+          if (-not $m.Success) { throw "clix/CHANGELOG.md has no '## Clix build N' heading" }
+          $localBuild = [int]$m.Groups[1].Value
+          $title = gh release view $tag --repo "${{ github.repository }}" --json name --jq .name 2>$null
           $exists = ($LASTEXITCODE -eq 0)
           $global:LASTEXITCODE = 0
-          $build = (-not $exists) -or ("${{ inputs.force }}" -eq "true")
+          $publishedBuild = -1
+          if ($exists) { $p = [regex]::Match("$title", 'Clix build (\d+)'); if ($p.Success) { $publishedBuild = [int]$p.Groups[1].Value } }
+          $event = "${{ github.event_name }}"
+          if ($event -eq 'pull_request') { $build = $true; $publish = $false; $why = "pull request: build and test only" }
+          elseif (-not $exists) { $build = $true; $publish = $true; $why = "new official version $tag" }
+          elseif ("${{ inputs.force }}" -eq "true") { $build = $true; $publish = $true; $why = "forced rebuild" }
+          elseif ($localBuild -gt $publishedBuild) { $build = $true; $publish = $true; $why = "Clix build $localBuild is newer than released build $publishedBuild" }
+          elseif ($event -eq 'push') { $build = $true; $publish = $false; $why = "push without a new Clix build number: build and test only" }
+          else { $build = $false; $publish = $false; $why = "$tag Clix build $publishedBuild is already released" }
           "tag=$tag" >> $env:GITHUB_OUTPUT
           "build=$build" >> $env:GITHUB_OUTPUT
-          Write-Output "Upstream $tag; already released here: $exists; building: $build"
-
-      - name: Checkout this fork (patch files)
-        if: steps.up.outputs.build == 'True'
-        uses: actions/checkout@v7
-        with:
-          path: fork
+          "publish=$publish" >> $env:GITHUB_OUTPUT
+          Write-Output "Upstream $tag, Clix build $localBuild (released: $publishedBuild). Build: $build, publish: $publish ($why)"
 
       - name: Checkout upstream release
         if: steps.up.outputs.build == 'True'
@@ -76,7 +104,7 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install Pillow (icon badge)
+      - name: Install Pillow (icon ring)
         if: steps.up.outputs.build == 'True'
         run: python -m pip install --disable-pip-version-check pillow==12.3.0
 
@@ -108,8 +136,16 @@ jobs:
           $sha = (Get-FileHash out/GHelper.exe -Algorithm SHA256).Hash
           "sha=$sha" >> $env:GITHUB_OUTPUT
 
+      - name: Keep the build (pull requests)
+        if: steps.up.outputs.build == 'True' && steps.up.outputs.publish != 'True'
+        uses: actions/upload-artifact@v4
+        with:
+          name: GHelper-clix-untested
+          path: out/GHelper.exe
+          retention-days: 7
+
       - name: Publish release
-        if: steps.up.outputs.build == 'True'
+        if: steps.up.outputs.publish == 'True'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -117,6 +153,7 @@ jobs:
           $tag = "${{ steps.up.outputs.tag }}"
           $repo = "${{ github.repository }}"
           # Clix part of the notes: the newest "## Clix build N" section of clix/CHANGELOG.md.
+          # The title carries "(Clix build N)": the patched updater compares it to offer rebuilds of one version.
           $log = Get-Content fork/clix/CHANGELOG.md -Raw
           $m = [regex]::Match($log, '(?ms)^## (Clix build \d+)\s*\n(.*?)(?=^## |\z)')
           if (-not $m.Success) { throw "clix/CHANGELOG.md has no '## Clix build N' section" }
@@ -157,3 +194,58 @@ jobs:
             gh release create $tag out/GHelper.exe out/GHelper.zip --repo $repo --target "${{ github.sha }}" --title $title --notes-file $notesFile
           }
           if ($LASTEXITCODE -ne 0) { throw "publishing the release failed" }
+
+      - name: Report a broken build
+        if: failure() && github.event_name != 'pull_request'
+        continue-on-error: true
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $title = "Clix build failed for G-Helper ${{ steps.up.outputs.tag }}"
+          $body = "The Clix patch could not be built for official G-Helper ${{ steps.up.outputs.tag }}: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}`n`nNothing was published, so the installed G-Helper Clix keeps working; it just isn't updated until the patch is fixed."
+          $n = gh issue list --repo "${{ github.repository }}" --state open --search "in:title `"$title`"" --json number --jq '.[0].number'
+          if ($n) { gh issue comment $n --repo "${{ github.repository }}" --body $body } else { gh issue create --repo "${{ github.repository }}" --title $title --body $body }
+
+  upstream-main:
+    # Early warning: does the patch still apply and build on upstream's development branch?
+    if: github.event_name != 'push'
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: fork
+      - uses: actions/checkout@v7
+        with:
+          repository: seerge/g-helper
+          path: upstream
+      - name: Upstream commit
+        id: rev
+        shell: pwsh
+        run: |
+          $sha = git -C upstream rev-parse --short HEAD
+          $version = ([xml](Get-Content upstream/app/GHelper.csproj)).Project.PropertyGroup.AssemblyVersion
+          "sha=$sha" >> $env:GITHUB_OUTPUT
+          Write-Output "seerge/g-helper development branch @ $sha (version $version)"
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check pillow==12.3.0
+      - name: Apply patch
+        run: python fork/clix/apply_patch.py upstream "${{ github.repository }}"
+      - name: Build
+        run: dotnet publish upstream/app/GHelper.sln --configuration Release --runtime win-x64 -p:PublishSingleFile=true --no-self-contained
+      - name: Report upcoming incompatibility
+        if: failure() && github.event_name == 'schedule'
+        continue-on-error: true
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $title = "Clix patch breaks on upstream G-Helper's development branch"
+          $body = "Upstream seerge/g-helper @ ${{ steps.rev.outputs.sha }} no longer takes the Clix patch: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}`n`nThe current release is fine. The next official G-Helper release will fail to build until clix/apply_patch.py or clix/src is updated."
+          $n = gh issue list --repo "${{ github.repository }}" --state open --search "in:title `"$title`"" --json number --jq '.[0].number'
+          if ($n) { gh issue comment $n --repo "${{ github.repository }}" --body $body } else { gh issue create --repo "${{ github.repository }}" --title $title --body $body }
