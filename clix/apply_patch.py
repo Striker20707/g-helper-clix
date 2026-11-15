@@ -261,7 +261,7 @@ def main():
                  "if (gitVersion.CompareTo(appVersion) > 0 || " + K + "ClixUpdate.IsNewerBuild(config, gitVersion, appVersion))")
     insert_after(upd, find_line(upd, "versionUrl = url;"), "tag = " + K + "ClixUpdate.Describe(config, tag);")
     replace_once(upd, 'settings.SetVersionLabel(Properties.Strings.VersionLabel + $": {appVersion.Major}.{appVersion.Minor}.{appVersion.Build}");',
-                 'settings.SetVersionLabel(Properties.Strings.VersionLabel + $": {appVersion.Major}.{appVersion.Minor}.{appVersion.Build} Clix {' + K + 'Gk6xBuild.Number}");')
+                 'settings.SetVersionLabel(Properties.Strings.VersionLabel + $": {appVersion.Major}.{appVersion.Minor}.{appVersion.Build}" + " Clix " + ' + K + 'Gk6xBuild.Number);')
 
     # 6c. Own scheduled tasks ("GHelperClix_<user>", "GHelperClixCharge"), so the Clix build and the official
     #     G-Helper never reschedule, re-enable or delete each other's startup and charge-limit tasks. Without
