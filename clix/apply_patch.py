@@ -274,6 +274,10 @@ def main():
     replace_once(st, 'td.RegistrationInfo.Description = "G-Helper Auto Start";', 'td.RegistrationInfo.Description = "G-Helper Clix Auto Start";')
     replace_once(st, 'td.RegistrationInfo.Description = "G-Helper Charge Limit";', 'td.RegistrationInfo.Description = "G-Helper Clix Charge Limit";')
 
+    # ClixGuard hands over between copies with G-Helper's own exit event; stop the build if upstream renames it.
+    require(app / "Helpers" / "ProcessHelper.cs", 'ExitEventName = "Global\\\\GHelperApp-Exit";',
+            "ClixGuard.ExitEventName must match it")
+
     # 7. Show the name "G-Helper Clix" in the window title and tray tooltip. The exe stays GHelper.exe,
     #    because the updater and the auto-start task look for that file name.
     replace_once(settings, 'Text = "G-Helper " + (ProcessHelper.IsUserAdministrator()',

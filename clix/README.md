@@ -80,6 +80,13 @@ The Clix build is used whenever it works at all:
    "C:\\path\\to\\GHelper.exe"` in config.json. At the next sign-in the Clix build tries again, in safe mode,
    so a fixed update can still arrive.
 
+Switching between the Clix build and official G-Helper is safe in both directions: the new one asks the
+running one to close normally, and the Clix keyboard drops back to the colours stored in Fn+W (official
+G-Helper can't change them, but they stay as last set).
+
+A start counts as good once G-Helper has run for 20 seconds or is closed normally. Opening G-Helper while it
+is already running (which replaces the running copy) never counts as a failed start.
+
 State is kept in `%AppData%\GHelper\clix-guard.txt`. Delete it to reset (for example to leave safe mode
 without waiting for an update). The official exe must be kept in a different folder from the Clix one.
 

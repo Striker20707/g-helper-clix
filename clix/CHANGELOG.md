@@ -4,6 +4,18 @@ Each release on this fork is named after the official G-Helper version it is bui
 v0.291), because G-Helper's updater compares that number. A rebuild of the same version replaces the
 files in that release, so the "Clix build" number below is what tells builds apart.
 
+## Clix build 10
+- Fix: opening G-Helper several times in a row (for example closing it and opening it again quickly, or
+  opening the exe while it was already in the tray) was wrongly counted as failed starts. After two, the
+  keyboard lighting was paused with a "crash" toast even though nothing had crashed, and after three the
+  official G-Helper could have been started instead. Opening G-Helper while it already runs no longer
+  counts, and a start now counts as good after 20 seconds instead of 45.
+- Smooth hand-over: opening G-Helper Clix or official G-Helper while the other one is running now asks
+  the running one to close normally first (up to 3 seconds), instead of it being cut off. The Clix leaves
+  live mode at once and falls back to its stored Fn+W colours, which G-Helper Clix keeps up to date in the
+  keyboard's memory, so the keyboard keeps working with the right colours under official G-Helper.
+- The toast now says why lighting is paused: an actual crash in Clix code, or a start that didn't finish.
+
 ## Clix build 9
 - Easier to tell apart: the app, taskbar and tray icons now have a thick purple ring instead of a small
   pink dot, so the Clix build stands out even at tray size and on light or dark taskbars. The version line

@@ -24,7 +24,7 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
     public static class ClixGuard
     {
         /// <summary>Seconds after launch before a start counts as good.</summary>
-        public const int HealthySeconds = 45;
+        public const int HealthySeconds = 20;
         /// <summary>Failed starts in a row (this one included) from which this launch runs in safe mode.</summary>
         public const int SafeModeAfter = 2;
         /// <summary>Failed starts in a row (this one included) from which the official G-Helper is started instead.</summary>
@@ -52,7 +52,13 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
         {
             try
             {
+                // Opening G-Helper while it already runs replaces the running copy. Ask it to close first, so it
+                // finishes cleanly (keyboard back on its stored colours) before G-Helper's own check would kill it.
+                // The running copy clearly started fine, so this is not a failed start either. (Before, opening the
+                // exe again a few times counted up to safe mode and its toast, and could start the official exe.)
+                bool replacing = HandOver();
                 Load();
+                if (replacing) failedStarts = 0;
                 failedStarts++;
                 if (failedStarts >= OfficialAfter && StartOfficial())
                 {
@@ -78,12 +84,54 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
             return false;
         }
 
+        /// <summary>G-Helper's own "another copy is starting" event (ProcessHelper.CheckAlreadyRunning).</summary>
+        public const string ExitEventName = "Global\\GHelperApp-Exit";
+        public const int HandOverMs = 3000;
+
+        /// <summary>
+        /// If another G-Helper (Clix or official, same process name) runs: signal it to exit the normal way and
+        /// wait up to HandOverMs for it. Returns true when one was running.
+        /// </summary>
+        private static bool HandOver()
+        {
+            Process[] others;
+            try
+            {
+                using var self = Process.GetCurrentProcess();
+                others = Process.GetProcessesByName(self.ProcessName).Where(p => p.Id != self.Id).ToArray();
+            }
+            catch { return false; }
+            if (others.Length == 0) return false;
+            Logger.WriteLine("Clix guard: another G-Helper is running, asking it to close first");
+            try
+            {
+                using var ev = EventWaitHandle.OpenExisting(ExitEventName);
+                try
+                {
+                    ev.Set();
+                    var until = Environment.TickCount64 + HandOverMs;
+                    foreach (var p in others)
+                    {
+                        int left = (int)Math.Max(0, until - Environment.TickCount64);
+                        try { p.WaitForExit(left); } catch { }
+                    }
+                }
+                finally { ev.Reset(); }
+            }
+            catch { }
+            foreach (var p in others) p.Dispose();
+            return true;
+        }
+
         /// <summary>Shown once G-Helper's toast exists (from the keyboard detection hook).</summary>
         public static void NotifyIfSafe()
         {
             if (!SafeMode || notified) return;
             notified = true;
-            try { Program.toast?.RunToast("G-Helper Clix: keyboard lighting paused after a crash. The next Clix update turns it back on."); } catch { }
+            string text = safeForBuild
+                ? "G-Helper Clix: keyboard lighting paused after a crash. The next Clix update turns it back on."
+                : "G-Helper Clix: keyboard lighting paused because G-Helper didn't start properly last time.";
+            try { Program.toast?.RunToast(text); } catch { }
         }
         private static bool notified;
 
