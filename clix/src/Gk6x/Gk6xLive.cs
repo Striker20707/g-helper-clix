@@ -6,7 +6,8 @@
 //  * The stored layers stay the fallback: a few seconds after the last change the colours are also written to
 //    Fn+W (and Fn+R is kept black), so whatever happens to G-Helper the keyboard shows the right thing.
 //  * Before the lights should go off, sleep, shutdown or exit, G-Helper leaves driver mode itself by selecting
-//    Fn+R (off) or Fn+W (on). Only if G-Helper is killed do the pings simply stop.
+//    Fn+R (off) or Fn+W (on), also as soon as another G-Helper (Clix or official) announces it is taking over.
+//    Only if G-Helper is killed without warning do the pings simply stop.
 //  * Any failure drops back to the stored layers; after three failures in a row live mode is off for the session.
 // All USB work happens under Gk6xKeyboards.ioGate on one open handle, so replies can never interleave.
 
@@ -108,7 +109,16 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
             exitHooked = true;
             AppDomain.CurrentDomain.ProcessExit += (_, _) => OnExit();
             try { System.Windows.Forms.Application.ApplicationExit += (_, _) => OnExit(); } catch { }
+            // Another G-Helper starting (Clix or official) signals this event and then ends this process. Leave
+            // driver mode the moment it is signalled, so the keyboard is already back on its stored colours.
+            try
+            {
+                exitSignal = EventWaitHandle.OpenExisting(ClixGuard.ExitEventName);
+                ThreadPool.RegisterWaitForSingleObject(exitSignal, (_, _) => OnExit(), null, Timeout.Infinite, true);
+            }
+            catch { }
         }
+        private static EventWaitHandle? exitSignal;
 
         /// <summary>G-Helper is closing: leave driver mode on the stored layer, so the keyboard keeps its colours.</summary>
         public static void OnExit()

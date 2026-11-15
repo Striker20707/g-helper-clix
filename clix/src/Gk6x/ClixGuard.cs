@@ -52,11 +52,13 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
         {
             try
             {
+                // Opening G-Helper while it already runs replaces the running copy. Ask it to close first, so it
+                // finishes cleanly (keyboard back on its stored colours) before G-Helper's own check would kill it.
+                // The running copy clearly started fine, so this is not a failed start either. (Before, opening the
+                // exe again a few times counted up to safe mode and its toast, and could start the official exe.)
+                bool replacing = HandOver();
                 Load();
-                // Opening G-Helper while it already runs closes the running copy and starts a new one. The running
-                // copy clearly started fine, even if it is closed before HealthySeconds, so that is not a failed
-                // start. (Before, opening and closing quickly a few times counted up to safe mode and the fallback.)
-                if (OtherInstanceRunning()) failedStarts = 0;
+                if (replacing) failedStarts = 0;
                 failedStarts++;
                 if (failedStarts >= OfficialAfter && StartOfficial())
                 {
@@ -82,17 +84,43 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
             return false;
         }
 
-        private static bool OtherInstanceRunning()
+        /// <summary>G-Helper's own "another copy is starting" event (ProcessHelper.CheckAlreadyRunning).</summary>
+        public const string ExitEventName = "Global\\GHelperApp-Exit";
+        public const int HandOverMs = 3000;
+
+        /// <summary>
+        /// If another G-Helper (Clix or official, same process name) runs: signal it to exit the normal way and
+        /// wait up to HandOverMs for it. Returns true when one was running.
+        /// </summary>
+        private static bool HandOver()
         {
+            Process[] others;
             try
             {
                 using var self = Process.GetCurrentProcess();
-                var all = Process.GetProcessesByName(self.ProcessName);
-                bool other = all.Any(p => p.Id != self.Id);
-                foreach (var p in all) p.Dispose();
-                return other;
+                others = Process.GetProcessesByName(self.ProcessName).Where(p => p.Id != self.Id).ToArray();
             }
             catch { return false; }
+            if (others.Length == 0) return false;
+            Logger.WriteLine("Clix guard: another G-Helper is running, asking it to close first");
+            try
+            {
+                using var ev = EventWaitHandle.OpenExisting(ExitEventName);
+                try
+                {
+                    ev.Set();
+                    var until = Environment.TickCount64 + HandOverMs;
+                    foreach (var p in others)
+                    {
+                        int left = (int)Math.Max(0, until - Environment.TickCount64);
+                        try { p.WaitForExit(left); } catch { }
+                    }
+                }
+                finally { ev.Reset(); }
+            }
+            catch { }
+            foreach (var p in others) p.Dispose();
+            return true;
         }
 
         /// <summary>Shown once G-Helper's toast exists (from the keyboard detection hook).</summary>
