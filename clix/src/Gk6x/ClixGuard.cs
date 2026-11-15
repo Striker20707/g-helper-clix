@@ -24,7 +24,7 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
     public static class ClixGuard
     {
         /// <summary>Seconds after launch before a start counts as good.</summary>
-        public const int HealthySeconds = 45;
+        public const int HealthySeconds = 20;
         /// <summary>Failed starts in a row (this one included) from which this launch runs in safe mode.</summary>
         public const int SafeModeAfter = 2;
         /// <summary>Failed starts in a row (this one included) from which the official G-Helper is started instead.</summary>
@@ -53,6 +53,10 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
             try
             {
                 Load();
+                // Opening G-Helper while it already runs closes the running copy and starts a new one. The running
+                // copy clearly started fine, even if it is closed before HealthySeconds, so that is not a failed
+                // start. (Before, opening and closing quickly a few times counted up to safe mode and the fallback.)
+                if (OtherInstanceRunning()) failedStarts = 0;
                 failedStarts++;
                 if (failedStarts >= OfficialAfter && StartOfficial())
                 {
@@ -78,12 +82,28 @@ namespace GHelper.Peripherals.Keyboard.Gk6x
             return false;
         }
 
+        private static bool OtherInstanceRunning()
+        {
+            try
+            {
+                using var self = Process.GetCurrentProcess();
+                var all = Process.GetProcessesByName(self.ProcessName);
+                bool other = all.Any(p => p.Id != self.Id);
+                foreach (var p in all) p.Dispose();
+                return other;
+            }
+            catch { return false; }
+        }
+
         /// <summary>Shown once G-Helper's toast exists (from the keyboard detection hook).</summary>
         public static void NotifyIfSafe()
         {
             if (!SafeMode || notified) return;
             notified = true;
-            try { Program.toast?.RunToast("G-Helper Clix: keyboard lighting paused after a crash. The next Clix update turns it back on."); } catch { }
+            string text = safeForBuild
+                ? "G-Helper Clix: keyboard lighting paused after a crash. The next Clix update turns it back on."
+                : "G-Helper Clix: keyboard lighting paused because G-Helper didn't start properly last time.";
+            try { Program.toast?.RunToast(text); } catch { }
         }
         private static bool notified;
 
