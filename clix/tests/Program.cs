@@ -617,6 +617,22 @@ static class Program
             }
         }
 
+        // ---- Updater: Clix rebuilds of the same official version ----
+        {
+            T.Check(GHelper.Peripherals.Keyboard.Gk6x.ClixUpdate.BuildFromTitle("G-Helper Clix v0.291 (Clix build 9)") == 9, "release title -> Clix build 9");
+            T.Check(GHelper.Peripherals.Keyboard.Gk6x.ClixUpdate.BuildFromTitle("v0.291") == -1, "official-style title has no Clix build");
+            T.Check(GHelper.Peripherals.Keyboard.Gk6x.ClixUpdate.BuildFromTitle(null) == -1, "missing title");
+            System.Text.Json.JsonElement Rel(string name) => System.Text.Json.JsonDocument.Parse("{\"name\":\"" + name + "\"}").RootElement;
+            var v291 = new Version("0.291"); var app291 = new Version("0.291.0.0"); var v292 = new Version("0.292");
+            int me = GHelper.Peripherals.Keyboard.Gk6x.Gk6xBuild.Number;
+            T.Check(GHelper.Peripherals.Keyboard.Gk6x.ClixUpdate.IsNewerBuild(Rel($"G-Helper Clix v0.291 (Clix build {me + 1})"), v291, app291), "same version, newer Clix build -> update");
+            T.Check(!GHelper.Peripherals.Keyboard.Gk6x.ClixUpdate.IsNewerBuild(Rel($"G-Helper Clix v0.291 (Clix build {me})"), v291, app291), "same version, same Clix build -> no update");
+            T.Check(!GHelper.Peripherals.Keyboard.Gk6x.ClixUpdate.IsNewerBuild(Rel($"G-Helper Clix v0.291 (Clix build {me - 1})"), v291, app291), "same version, older Clix build -> no update");
+            T.Check(!GHelper.Peripherals.Keyboard.Gk6x.ClixUpdate.IsNewerBuild(Rel($"G-Helper Clix v0.292 (Clix build {me + 1})"), v292, app291), "newer version is left to G-Helper's own check");
+            T.Check(GHelper.Peripherals.Keyboard.Gk6x.ClixUpdate.Describe(Rel("G-Helper Clix v0.291 (Clix build 12)"), "0.291") == "0.291 (Clix build 12)", "prompt names the Clix build");
+            T.Check(new Version("0.291").CompareTo(app291) < 0 && GHelper.Peripherals.Keyboard.Gk6x.ClixUpdate.SameVersion(new Version("0.291"), app291), "tag 0.291 and exe 0.291.0.0 count as the same version");
+        }
+
         return T.Summary();
     }
 }
